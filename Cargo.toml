@@ -1,0 +1,14 @@
+[package]
+name = "bounded-run"
+version = "0.1.0"
+edition = "2021"
+description = "A command-line tool for running commands with time, output, and process-tree limits."
+license = "MIT"
+
+[[bin]]
+name = "run-bounded"
+path = "src/main.rs"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+

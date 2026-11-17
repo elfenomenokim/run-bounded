@@ -1,0 +1,35 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "run-bounded"
+version = "0.1.0"
+description = "A command-line tool and Python library for running commands with time, output, and process-tree limits."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "El Fenomeno" }]
+keywords = ["cli", "process", "timeout", "subprocess", "process-tree", "rust", "python"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: System :: Systems Administration",
+]
+
+[project.urls]
+Repository = "https://github.com/elfenomenokim/run-bounded"
+Issues = "https://github.com/elfenomenokim/run-bounded/issues"
+
+[tool.maturin]
+bindings = "bin"
+python-source = "python"
+module-name = "bounded_run"
+strip = true
