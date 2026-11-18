@@ -32,6 +32,10 @@ enum Event {
     Exited(io::Result<ExitStatus>),
 }
 
+/// After a deadline kill, forwarding may be blocked on a consumer that stopped
+/// reading. Let the streams drain for this long, then report the timeout anyway.
+const DRAIN_GRACE: Duration = Duration::from_millis(100);
+
 #[derive(Debug)]
 struct ResultRow {
     class: &'static str,
@@ -143,9 +147,13 @@ fn run() -> Result<(ResultRow, i32), String> {
     let mut last_output = start;
     let mut stream_count = 0;
     let mut status = None;
+    let mut drain_until: Option<Instant> = None;
     while status.is_none() || stream_count < 2 {
+        if killed && status.is_some() && drain_until.is_none() {
+            drain_until = Some(Instant::now() + DRAIN_GRACE);
+        }
         let next_deadline = if killed {
-            None
+            drain_until
         } else {
             let wall = (timeout > 0.0).then(|| start + Duration::from_secs_f64(timeout));
             let idle_deadline = (idle > 0.0).then(|| last_output + Duration::from_secs_f64(idle));
@@ -160,6 +168,11 @@ fn run() -> Result<(ResultRow, i32), String> {
             Ok(Event::StreamDone) => stream_count += 1,
             Ok(Event::Exited(result)) => status = Some(result),
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                if killed {
+                    // The child is gone; a reader is still blocked writing to a
+                    // pipe nobody reads. Do not lose the timeout result to it.
+                    break;
+                }
                 let now = Instant::now();
                 if timeout > 0.0 && now.duration_since(start).as_secs_f64() >= timeout {
                     class = "timeout";
@@ -179,8 +192,10 @@ fn run() -> Result<(ResultRow, i32), String> {
             }
         }
     }
-    let _ = a.join();
-    let _ = b.join();
+    if stream_count == 2 {
+        let _ = a.join();
+        let _ = b.join();
+    }
     let _ = waiter.join();
     #[cfg(windows)]
     close_job(job);
@@ -188,6 +203,10 @@ fn run() -> Result<(ResultRow, i32), String> {
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .and_then(|s| s.code());
+    let signal = status
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .and_then(terminating_signal);
     if !killed {
         if let Some(Ok(s)) = status.as_ref() {
             if s.success() {
@@ -208,9 +227,8 @@ fn run() -> Result<(ResultRow, i32), String> {
     };
     let code = match class {
         "ok" => 0,
-        "timeout" => 124,
-        "idle" => 124,
-        "signal" => 128 + 1,
+        "timeout" | "idle" => 124,
+        "signal" => 128 + signal.unwrap_or(1),
         _ => exit.unwrap_or(1),
     };
     Ok((r, code))
@@ -238,6 +256,15 @@ fn reader<R: Read + Send + 'static, W: Write + Send + 'static>(
         }
         let _ = tx.send(Event::StreamDone);
     })
+}
+#[cfg(unix)]
+fn terminating_signal(status: &ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+#[cfg(windows)]
+fn terminating_signal(_status: &ExitStatus) -> Option<i32> {
+    None
 }
 #[cfg(unix)]
 fn terminate_current(pid: u32) {

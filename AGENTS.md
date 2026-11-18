@@ -26,7 +26,8 @@
 - Unix cleanup must signal the process group, not only the direct child.
 - Windows cleanup must use a Job Object in both editions.
 - Keep the JSON result on stderr so child stdout remains usable as command output.
-- Preserve exit codes for child failures; timeout and idle use 124.
+- Preserve exit codes for child failures; timeout and idle use 124; a signal death returns 128 + the signal number.
+- A deadline kill must report its timeout even when output forwarding is blocked on a consumer that stopped reading.
 - Never put real home paths, hostnames, credentials, or account data in demo inputs.
 - Keep README.md and README.ko.md aligned in commands, measurements, and platform claims.
 - Do not publish the CLI to crates.io or Python to PyPI without owner review.
