@@ -4,6 +4,7 @@
 
 - `src/main.rs`: Rust CLI and process lifecycle.
 - `python/bounded_run/`: importable Python library.
+- `tests/cli.rs` and `tests/test_python.py`: regressions that need a real process (`cargo test --locked`, `python3 tests/test_python.py`).
 - `docs/demo/`: VHS tapes, recorded demos, and social-preview source image.
 - `pyproject.toml` and `.github/workflows/`: PyPI package workflow and the automatic pull request review.
 - `docs/bench/`: saved benchmark results.
@@ -23,11 +24,12 @@
 
 - Keep child stdout and stderr independent and drain both while enforcing caps.
 - Accept absolute executable paths and bare names resolved through PATH; reject relative paths containing `/` or `\`. Pass only the documented minimal environment.
-- Unix cleanup must signal the process group, not only the direct child.
-- Windows cleanup must use a Job Object in both editions.
+- Unix cleanup must signal the process group, not only the direct child, and a signal that stops the runner must do the same.
+- Windows cleanup must use a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` in both editions.
 - Keep the JSON result on stderr so child stdout remains usable as command output.
 - Preserve exit codes for child failures; timeout and idle use 124; a signal death returns 128 + the signal number.
-- A deadline kill must report its timeout even when output forwarding is blocked on a consumer that stopped reading.
+- A deadline kill must report its timeout even when output forwarding is blocked on a consumer that stopped reading, in both editions.
+- A limit value outside the representable duration range is a CLI error (125), never a panic.
 - Never put real home paths, hostnames, credentials, or account data in demo inputs.
 - Keep README.md and README.ko.md aligned in commands, measurements, and platform claims.
 - Do not publish the CLI to crates.io or Python to PyPI without owner review.

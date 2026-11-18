@@ -15,6 +15,7 @@
     "Cargo.lock",
     "src/main.rs",
     "tests/cli.rs",
+    "tests/test_python.py",
     "python/pyproject.toml",
     "python/bounded_run/__init__.py",
     "README.md",

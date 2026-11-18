@@ -7,9 +7,9 @@
 
 A command-line tool and Python library for running commands with time, output, and process-tree limits.
 
-Rust 1.75+ · Python 3.10+
+Rust 1.82+ · Python 3.10+
 
-[![rust](https://img.shields.io/badge/rust-1.75%2B-lightgrey)](https://github.com/elfenomenokim/run-bounded/blob/main/Cargo.toml)
+[![rust](https://img.shields.io/badge/rust-1.82%2B-lightgrey)](https://github.com/elfenomenokim/run-bounded/blob/main/Cargo.toml)
 [![license](https://img.shields.io/github/license/elfenomenokim/run-bounded)](https://github.com/elfenomenokim/run-bounded/blob/main/LICENSE)
 
 5.3 ms per run; a Python `subprocess.run` call to the same command takes 37.9 ms. Both from the saved 30-run `hyperfine` file.
@@ -39,7 +39,7 @@ cargo install --locked --path .
 wheel from the same checkout: `python3 -m pip wheel --no-deps -w dist .` and install the file in
 `dist/`. The package is not on PyPI yet.
 
-Rust 1.75 or newer is needed; the wheel installs the same binary and the importable Python package
+Rust 1.82 or newer is needed; the wheel installs the same binary and the importable Python package
 `bounded_run`.
 
 ## Quick start
@@ -118,7 +118,7 @@ run-bounded [--timeout SEC] [--idle SEC] [--max-output BYTES] -- COMMAND [ARGS..
 
 ## Platforms
 
-The CLI was built and exercised on macOS 27.0 arm64, Ubuntu 24.04 arm64 on A1, and Windows build 26340 x64 (reported OS version 10.0.26340.0). The Python library was exercised on macOS and Windows. The Windows Rust build used the laptop's existing Rust 1.100 GNU toolchain. Timeout and idle return 124, CLI errors return 125, and normal child failures retain the child's exit code. A child terminated by a signal returns 128 plus the signal number, and its JSON `exit_code` is null. A consumer that stops reading its output cannot delay a timeout result: once a limit terminates the child, the CLI reports the timeout without waiting for the blocked output write.
+The CLI was built and exercised on macOS 27.0 arm64, Ubuntu 24.04 arm64 on A1, and Windows build 26340 x64 (reported OS version 10.0.26340.0). The Python library was exercised on macOS and Windows. The Windows Rust build used the laptop's existing Rust 1.100 GNU toolchain. Timeout and idle return 124, CLI errors return 125, and normal child failures retain the child's exit code. A child terminated by a signal returns 128 plus the signal number, and its JSON `exit_code` is null. A consumer that stops reading its output cannot delay a timeout result: once a limit terminates the child, both editions report the timeout without waiting for the blocked output write or for a descendant that left the process group. When the runner itself receives SIGINT, SIGTERM or SIGHUP, it stops the child tree first; a Windows job also ends its children when the runner closes it.
 
 ## Contributing
 

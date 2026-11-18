@@ -7,9 +7,9 @@
 
 명령의 실행 시간, 출력량, 프로세스 트리를 제한하는 CLI와 Python 라이브러리입니다.
 
-Rust 1.75+ · Python 3.10+
+Rust 1.82+ · Python 3.10+
 
-[![rust](https://img.shields.io/badge/rust-1.75%2B-lightgrey)](https://github.com/elfenomenokim/run-bounded/blob/main/Cargo.toml)
+[![rust](https://img.shields.io/badge/rust-1.82%2B-lightgrey)](https://github.com/elfenomenokim/run-bounded/blob/main/Cargo.toml)
 [![license](https://img.shields.io/github/license/elfenomenokim/run-bounded)](https://github.com/elfenomenokim/run-bounded/blob/main/LICENSE)
 
 한 번 실행에 5.3ms입니다. 같은 명령을 Python `subprocess.run`으로 부르면 37.9ms입니다. 두 값 모두 저장된 30회 `hyperfine` 측정에서 가져왔습니다.
@@ -39,7 +39,7 @@ cargo install --locked --path .
 wheel을 만들어 설치합니다. `python3 -m pip wheel --no-deps -w dist .`를 실행하고 `dist/`에 생긴 파일을
 설치하세요. 이 패키지는 아직 PyPI에 올라가 있지 않습니다.
 
-Rust 1.75 이상이 필요합니다. wheel에는 같은 실행 파일과 가져다 쓸 수 있는 Python 패키지 `bounded_run`이
+Rust 1.82 이상이 필요합니다. wheel에는 같은 실행 파일과 가져다 쓸 수 있는 Python 패키지 `bounded_run`이
 함께 들어 있습니다.
 
 ## 빠른 시작
@@ -98,7 +98,7 @@ bounded output
 
 ## 플랫폼
 
-CLI는 macOS 27.0 arm64, A1의 Ubuntu 24.04 arm64, Windows 빌드 26340 x64(보고된 OS 버전 10.0.26340.0)에서 빌드와 동작을 확인했습니다. Python 라이브러리는 macOS와 Windows에서 확인했습니다. Windows Rust 빌드는 노트북에 이미 설치된 Rust 1.100 GNU 툴체인으로 진행했습니다. 시간 초과와 유휴 시간 초과는 124, CLI 오류는 125를 반환합니다. 일반 실패는 자식의 종료 코드를 유지합니다. 시그널로 종료된 자식은 128에 시그널 번호를 더한 값을 반환하고, JSON `exit_code`는 null입니다. 출력을 읽지 않는 소비자는 시간 초과 결과를 지연시킬 수 없습니다. 제한이 자식을 종료하면 CLI는 막힌 출력 쓰기를 기다리지 않고 시간 초과를 보고합니다.
+CLI는 macOS 27.0 arm64, A1의 Ubuntu 24.04 arm64, Windows 빌드 26340 x64(보고된 OS 버전 10.0.26340.0)에서 빌드와 동작을 확인했습니다. Python 라이브러리는 macOS와 Windows에서 확인했습니다. Windows Rust 빌드는 노트북에 이미 설치된 Rust 1.100 GNU 툴체인으로 진행했습니다. 시간 초과와 유휴 시간 초과는 124, CLI 오류는 125를 반환합니다. 일반 실패는 자식의 종료 코드를 유지합니다. 시그널로 종료된 자식은 128에 시그널 번호를 더한 값을 반환하고, JSON `exit_code`는 null입니다. 출력을 읽지 않는 소비자는 시간 초과 결과를 지연시킬 수 없습니다. 제한이 자식을 종료하면 두 에디션 모두 막힌 출력 쓰기나 프로세스 그룹을 떠난 자손을 기다리지 않고 시간 초과를 보고합니다. 실행기 자체가 SIGINT, SIGTERM, SIGHUP을 받으면 자식 트리를 먼저 종료합니다. Windows 작업 객체는 실행기가 닫힐 때도 자식을 종료합니다.
 
 ## 명령 형식
 

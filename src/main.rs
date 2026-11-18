@@ -6,14 +6,74 @@ mod win_job {
 
     pub type Handle = *mut c_void;
 
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct BasicLimitInformation {
+        per_process_user_time_limit: i64,
+        per_job_user_time_limit: i64,
+        limit_flags: u32,
+        minimum_working_set_size: usize,
+        maximum_working_set_size: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct IoCounters {
+        read_operation_count: u64,
+        write_operation_count: u64,
+        other_operation_count: u64,
+        read_transfer_count: u64,
+        write_transfer_count: u64,
+        other_transfer_count: u64,
+    }
+
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct ExtendedLimitInformation {
+        basic: BasicLimitInformation,
+        io: IoCounters,
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory_used: usize,
+        peak_job_memory_used: usize,
+    }
+
+    const KILL_ON_JOB_CLOSE: u32 = 0x2000;
+    const EXTENDED_LIMIT_INFORMATION_CLASS: i32 = 9;
+
     #[link(name = "kernel32")]
     unsafe extern "system" {
         pub fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> Handle;
+        pub fn SetInformationJobObject(
+            job: Handle,
+            info_class: i32,
+            info: *const c_void,
+            length: u32,
+        ) -> i32;
         pub fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
         pub fn TerminateJobObject(job: Handle, exit_code: u32) -> i32;
         pub fn CloseHandle(handle: Handle) -> i32;
     }
+
+    /// Closing the last handle to a job with this flag kills every process still in it, so a
+    /// runner that dies without cleanup cannot leave the child tree behind.
+    pub unsafe fn kill_on_close(job: Handle) -> bool {
+        let mut information: ExtendedLimitInformation = std::mem::zeroed();
+        information.basic.limit_flags = KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(
+            job,
+            EXTENDED_LIMIT_INFORMATION_CLASS,
+            std::ptr::addr_of!(information).cast(),
+            std::mem::size_of::<ExtendedLimitInformation>() as u32,
+        ) != 0
+    }
 }
+#[cfg(unix)]
+use std::sync::atomic::AtomicI32;
 use std::{
     env,
     io::{self, Read, Write},
@@ -35,6 +95,18 @@ enum Event {
 /// After a deadline kill, forwarding may be blocked on a consumer that stopped
 /// reading. Let the streams drain for this long, then report the timeout anyway.
 const DRAIN_GRACE: Duration = Duration::from_millis(100);
+
+/// The child's process group, so a signal that stops the runner also stops the tree.
+#[cfg(unix)]
+static CHILD_GROUP: AtomicI32 = AtomicI32::new(0);
+
+/// A deadline that a finite, in-range limit can represent; an unrepresentable one becomes none.
+fn deadline(base: Instant, seconds: f64) -> Option<Instant> {
+    if seconds <= 0.0 {
+        return None;
+    }
+    base.checked_add(Duration::try_from_secs_f64(seconds).ok()?)
+}
 
 #[derive(Debug)]
 struct ResultRow {
@@ -80,6 +152,8 @@ fn run() -> Result<(ResultRow, i32), String> {
         return Err("relative command paths with a separator are not accepted; use a bare PATH name or an absolute path".into());
     }
     let start = Instant::now();
+    #[cfg(unix)]
+    install_signal_handlers();
     let mut cmd = Command::new(&command[0]);
     cmd.args(&command[1..])
         .env_clear()
@@ -121,6 +195,10 @@ fn run() -> Result<(ResultRow, i32), String> {
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     #[cfg(unix)]
     let pid = child.id();
+    #[cfg(unix)]
+    if pid <= i32::MAX as u32 {
+        CHILD_GROUP.store(pid as i32, Ordering::SeqCst);
+    }
     #[cfg(windows)]
     let job = match create_job(&child) {
         Ok(job) => job,
@@ -155,8 +233,8 @@ fn run() -> Result<(ResultRow, i32), String> {
         let next_deadline = if killed {
             drain_until
         } else {
-            let wall = (timeout > 0.0).then(|| start + Duration::from_secs_f64(timeout));
-            let idle_deadline = (idle > 0.0).then(|| last_output + Duration::from_secs_f64(idle));
+            let wall = deadline(start, timeout);
+            let idle_deadline = deadline(last_output, idle);
             wall.into_iter().chain(idle_deadline).min()
         };
         let event = match next_deadline {
@@ -267,17 +345,48 @@ fn terminating_signal(_status: &ExitStatus) -> Option<i32> {
     None
 }
 #[cfg(unix)]
+fn install_signal_handlers() {
+    unsafe {
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            libc::signal(signal, on_stop_signal as *const () as libc::sighandler_t);
+        }
+    }
+}
+/// Async-signal-safe cleanup: stop the child tree, then die by the signal that arrived.
+#[cfg(unix)]
+extern "C" fn on_stop_signal(signal: libc::c_int) {
+    let group = CHILD_GROUP.load(Ordering::SeqCst);
+    if group > 0 {
+        terminate_group(group);
+    }
+    unsafe {
+        libc::signal(signal, libc::SIG_DFL);
+        libc::raise(signal);
+        libc::_exit(128 + signal);
+    }
+}
+#[cfg(unix)]
 fn terminate_current(pid: u32) {
-    unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
-    let grace = Instant::now() + Duration::from_millis(200);
-    while Instant::now() < grace {
-        if unsafe { libc::kill(-(pid as i32), 0) } != 0 {
+    if pid <= i32::MAX as u32 {
+        terminate_group(pid as i32);
+    }
+}
+/// TERM the group, give it 200 ms, then KILL. Uses only async-signal-safe calls.
+#[cfg(unix)]
+fn terminate_group(group: i32) {
+    unsafe { libc::kill(-group, libc::SIGTERM) };
+    let pause = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 5_000_000,
+    };
+    for _ in 0..40 {
+        if unsafe { libc::kill(-group, 0) } != 0 {
             return;
         }
-        thread::sleep(Duration::from_millis(5));
+        unsafe { libc::nanosleep(&pause, std::ptr::null_mut()) };
     }
-    if unsafe { libc::kill(-(pid as i32), 0) } == 0 {
-        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    if unsafe { libc::kill(-group, 0) } == 0 {
+        unsafe { libc::kill(-group, libc::SIGKILL) };
     }
 }
 #[cfg(windows)]
@@ -295,6 +404,11 @@ fn create_job(child: &Child) -> io::Result<win_job::Handle> {
         let job = win_job::CreateJobObjectW(std::ptr::null(), std::ptr::null());
         if job.is_null() {
             return Err(io::Error::last_os_error());
+        }
+        if !win_job::kill_on_close(job) {
+            let err = io::Error::last_os_error();
+            win_job::CloseHandle(job);
+            return Err(err);
         }
         if win_job::AssignProcessToJobObject(job, child.as_raw_handle() as _) == 0 {
             let err = io::Error::last_os_error();
@@ -316,11 +430,13 @@ fn parse(s: &str) -> Result<f64, String> {
     let n = s
         .parse::<f64>()
         .map_err(|_| format!("invalid seconds: {s}"))?;
-    if !n.is_finite() || n < 0.0 {
-        Err("seconds must be finite and nonnegative".into())
-    } else {
-        Ok(n)
+    let limit = Duration::try_from_secs_f64(n).map_err(|_| {
+        format!("seconds must be finite, nonnegative and within the duration range: {s}")
+    })?;
+    if Instant::now().checked_add(limit).is_none() {
+        return Err(format!("seconds are too large for this host's clock: {s}"));
     }
+    Ok(n)
 }
 fn parse_size(s: &str) -> Result<usize, String> {
     let (num, mult) = if let Some(v) = s.strip_suffix('K').or_else(|| s.strip_suffix('k')) {

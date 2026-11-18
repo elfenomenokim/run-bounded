@@ -5,11 +5,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-18
+
+### Changed
+
+- The minimum Rust version is 1.82, declared in `Cargo.toml`, so `cargo build --locked` works on the
+  stated minimum. The previous 1.75 claim could not compile the `unsafe extern` block or read the v4
+  lockfile.
+
 ### Fixed
 
 - A consumer that stops reading output can no longer block a timeout result: the deadline kill
   reports the timeout instead of waiting for a blocked write.
 - A child terminated by a signal returns 128 plus that signal, instead of always 129.
+- The Python edition reports the timeout after a bounded drain, instead of waiting for a descendant
+  that left the process group and kept stdout or stderr open.
+- SIGINT, SIGTERM and SIGHUP stop the child's process group before the runner exits, in both
+  editions, so a parent exit no longer leaves the child tree behind.
+- The Windows Job Object sets `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` in both editions, so a runner
+  that dies without cleanup still ends the child tree.
+- `--timeout` and `--idle` reject values outside the representable duration range with exit 125
+  instead of panicking; the deadline arithmetic uses `checked_add`.
 
 ## [0.1.1] - 2026-11-17
 

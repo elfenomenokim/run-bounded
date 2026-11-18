@@ -13,13 +13,14 @@ Fixes and reports are welcome. You do not need to ask before opening a pull requ
 
 ## Set up
 
-Rust 1.75 or newer. The test suite needs nothing else.
+Rust 1.82 or newer. The test suite needs nothing else.
 
 ```sh
 git clone https://github.com/elfenomenokim/run-bounded
 cd run-bounded
 cargo build --locked
 cargo test --locked
+python3 tests/test_python.py
 ```
 
 The Python library lives in `python/bounded_run/` and is built by maturin; build it with
@@ -27,7 +28,7 @@ The Python library lives in `python/bounded_run/` and is built by maturin; build
 
 ## What a good patch has
 
-- **A test that fails without the change** in `tests/cli.rs`, run once against the old code.
+- **A test that fails without the change** in `tests/cli.rs` or `tests/test_python.py`, run once against the old code.
 - **The flags, JSON fields and exit codes aligned** between the CLI and the Python library. A change
   to one that is not made in the other is a defect, not a follow-up.
 - **A line under Unreleased** in [CHANGELOG.md](CHANGELOG.md) when a user will notice.

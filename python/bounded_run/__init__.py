@@ -21,6 +21,43 @@ class RunResult:
     stderr_truncated: bool
 
 
+# After a deadline kill, a descendant outside the process group may still hold a
+# stream open. Forward for this long, then report the limit instead of waiting.
+DRAIN_GRACE = 0.1
+
+
+class _Stopped(BaseException):
+    """Raised in the main thread when the process receives SIGINT, SIGTERM or SIGHUP."""
+
+    def __init__(self, signum):
+        self.signum = signum
+
+
+def _install_stop_handlers():
+    """Temporarily turn stop signals into an exception so the child tree can be killed."""
+    if os.name != "posix" or threading.current_thread() is not threading.main_thread():
+        return {}
+    previous = {}
+
+    def stop(signum, _frame):
+        raise _Stopped(signum)
+
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        try:
+            previous[signum] = signal.signal(signum, stop)
+        except (OSError, ValueError):
+            pass
+    return previous
+
+
+def _restore_stop_handlers(previous) -> None:
+    for signum, handler in previous.items():
+        try:
+            signal.signal(signum, handler)
+        except (OSError, ValueError):
+            pass
+
+
 def run(command: Sequence[str], *, timeout: float = 60, idle: float = 20,
         max_output: int = 1_048_576, env: dict[str, str] | None = None) -> RunResult:
     """Execute an absolute or PATH-resolved command with independent stream caps."""
@@ -84,32 +121,54 @@ def run(command: Sequence[str], *, timeout: float = 60, idle: float = 20,
     waiter.start()
     classification = "ok"
     killed = False
-    while True:
-        wake.clear()
-        with lock:
-            complete = child_done.is_set() and all(reader_done)
-            last = last_output[0]
-        if complete:
-            code = proc.returncode
-            if not killed:
-                classification = "ok" if code == 0 else ("signal" if code < 0 else "failed")
-            break
-        now = time.monotonic()
-        if not killed and timeout and now - start >= timeout:
-            classification = "timeout"; _terminate(proc, job); killed = True
-        elif not killed and idle and now - last >= idle:
-            classification = "idle"; _terminate(proc, job); killed = True
-        if not killed:
-            remaining = []
-            if timeout: remaining.append(start + timeout - now)
-            if idle: remaining.append(last + idle - now)
-            wake.wait(max(0, min(remaining)) if remaining else None)
-        else:
-            wake.wait()
-    for t in threads: t.join()
-    waiter.join()
+    drain_until = None
+    stopped = None
+    handlers = _install_stop_handlers()
+    try:
+        while True:
+            wake.clear()
+            with lock:
+                complete = child_done.is_set() and all(reader_done)
+                last = last_output[0]
+            if complete:
+                code = proc.returncode
+                if not killed:
+                    classification = "ok" if code == 0 else ("signal" if code < 0 else "failed")
+                break
+            now = time.monotonic()
+            if not killed and timeout and now - start >= timeout:
+                classification = "timeout"; _terminate(proc, job); killed = True
+                drain_until = now + DRAIN_GRACE
+            elif not killed and idle and now - last >= idle:
+                classification = "idle"; _terminate(proc, job); killed = True
+                drain_until = now + DRAIN_GRACE
+            if killed:
+                if drain_until is None:
+                    drain_until = time.monotonic() + DRAIN_GRACE
+                if time.monotonic() >= drain_until:
+                    break
+                wake.wait(drain_until - time.monotonic())
+            else:
+                remaining = []
+                if timeout: remaining.append(start + timeout - now)
+                if idle: remaining.append(last + idle - now)
+                wake.wait(max(0, min(remaining)) if remaining else None)
+    except _Stopped as interrupt:
+        stopped = interrupt
+    finally:
+        _restore_stop_handlers(handlers)
+        if not child_done.is_set():
+            _terminate(proc, job)
+    grace_end = time.monotonic() + DRAIN_GRACE
+    for t in threads:
+        t.join(max(0, grace_end - time.monotonic()))
+    waiter.join(DRAIN_GRACE)
     with lock: out, out_truncated = streams[0]; err, err_truncated = streams[1]
     if job is not None: _close_windows_job(job)
+    if stopped is not None:
+        signal.signal(stopped.signum, signal.SIG_DFL)
+        os.kill(os.getpid(), stopped.signum)
+        raise stopped
     return RunResult(classification, time.monotonic()-start, proc.returncode, bytes(out), bytes(err), out_truncated, err_truncated)
 
 
@@ -121,11 +180,48 @@ def _windows_api():
     kernel32.CreateJobObjectW.restype = wintypes.HANDLE
     kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
     kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
     kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
     kernel32.TerminateJobObject.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     kernel32.CloseHandle.restype = wintypes.BOOL
     return kernel32
+
+
+def _job_limit_information(ctypes):
+    """JOBOBJECT_EXTENDED_LIMIT_INFORMATION with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE."""
+    class BasicLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", ctypes.c_uint32),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", ctypes.c_uint32),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", ctypes.c_uint32),
+            ("SchedulingClass", ctypes.c_uint32),
+        ]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_uint64) for name in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+    class ExtendedLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", BasicLimitInformation),
+            ("IoInfo", IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    information = ExtendedLimitInformation()
+    information.BasicLimitInformation.LimitFlags = 0x2000
+    return information
 
 
 def _create_windows_job(proc: subprocess.Popen):
@@ -134,6 +230,11 @@ def _create_windows_job(proc: subprocess.Popen):
     job = kernel32.CreateJobObjectW(None, None)
     if not job:
         raise ctypes.WinError(ctypes.get_last_error())
+    information = _job_limit_information(ctypes)
+    if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(information), ctypes.sizeof(information)):
+        error = ctypes.WinError(ctypes.get_last_error())
+        kernel32.CloseHandle(job)
+        raise error
     if not kernel32.AssignProcessToJobObject(job, ctypes.c_void_p(proc._handle)):
         error = ctypes.WinError(ctypes.get_last_error())
         kernel32.CloseHandle(job)
