@@ -1,3 +1,5 @@
+<div align="center">
+
 <img src="https://raw.githubusercontent.com/elfenomenokim/run-bounded/main/docs/logo.svg" width="96" height="96" alt="명령 화살표가 한계 막대에 멈춘 run-bounded 아이콘">
 
 # run-bounded
@@ -11,6 +13,10 @@ Rust 1.75+ · Python 3.10+
 [![license](https://img.shields.io/github/license/elfenomenokim/run-bounded)](https://github.com/elfenomenokim/run-bounded/blob/main/LICENSE)
 
 한 번 실행에 5.3ms입니다. 같은 명령을 Python `subprocess.run`으로 부르면 37.9ms입니다. 두 값 모두 저장된 30회 `hyperfine` 측정에서 가져왔습니다.
+
+[설치](#설치) · [빠른 시작](#빠른-시작) · [비교](#비교)
+
+</div>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/elfenomenokim/run-bounded/main/docs/demo/run-bounded-dark.gif">

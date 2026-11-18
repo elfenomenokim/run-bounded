@@ -1,3 +1,5 @@
+<div align="center">
+
 <img src="https://raw.githubusercontent.com/elfenomenokim/run-bounded/main/docs/logo.svg" width="96" height="96" alt="run-bounded: a command arrow stopped by a limit">
 
 # run-bounded
@@ -11,6 +13,10 @@ Rust 1.75+ · Python 3.10+
 [![license](https://img.shields.io/github/license/elfenomenokim/run-bounded)](https://github.com/elfenomenokim/run-bounded/blob/main/LICENSE)
 
 5.3 ms per run; a Python `subprocess.run` call to the same command takes 37.9 ms. Both from the saved 30-run `hyperfine` file.
+
+[Install](#install) · [Quick start](#quick-start) · [Why](#why)
+
+</div>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/elfenomenokim/run-bounded/main/docs/demo/run-bounded-dark.gif">
