@@ -60,5 +60,5 @@
     ".github/pull_request_template.md",
     "docs/logo.svg"
   ],
-  "crates_io": "https://crates.io/crates/bounded-run"
+  "pypi": "https://pypi.org/project/run-bounded/"
 }

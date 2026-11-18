@@ -9,6 +9,7 @@
 
 Rust 1.82+ · Python 3.10+
 
+[![pypi](https://img.shields.io/pypi/v/run-bounded?label=pypi)](https://pypi.org/project/run-bounded/)
 [![rust](https://img.shields.io/badge/rust-1.82%2B-lightgrey)](https://github.com/elfenomenokim/run-bounded/blob/main/Cargo.toml)
 [![license](https://img.shields.io/github/license/elfenomenokim/run-bounded)](https://github.com/elfenomenokim/run-bounded/blob/main/LICENSE)
 
@@ -30,17 +31,21 @@ Rust 1.82+ · Python 3.10+
 ## 설치
 
 ```sh
+pipx install run-bounded
+uv tool install run-bounded
+pip install run-bounded
+```
+
+Python 3.10 이상이 필요합니다. macOS·Linux·Windows용 wheel에 `run-bounded` 실행 파일과 Python 패키지
+`bounded_run`이 함께 들어 있어 Rust를 설치하지 않아도 됩니다.
+
+소스에서 설치할 때는 Rust 1.82 이상이 필요합니다.
+
+```sh
 git clone https://github.com/elfenomenokim/run-bounded
 cd run-bounded
 cargo install --locked --path .
 ```
-
-`cargo install`은 `run-bounded` 실행 파일을 `~/.cargo/bin`에 넣습니다. Python 라이브러리는 같은 체크아웃에서
-wheel을 만들어 설치합니다. `python3 -m pip wheel --no-deps -w dist .`를 실행하고 `dist/`에 생긴 파일을
-설치하세요. 이 패키지는 아직 PyPI에 올라가 있지 않습니다.
-
-Rust 1.82 이상이 필요합니다. wheel에는 같은 실행 파일과 가져다 쓸 수 있는 Python 패키지 `bounded_run`이
-함께 들어 있습니다.
 
 ## 빠른 시작
 

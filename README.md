@@ -9,6 +9,7 @@ A command-line tool and Python library for running commands with time, output, a
 
 Rust 1.82+ · Python 3.10+
 
+[![pypi](https://img.shields.io/pypi/v/run-bounded?label=pypi)](https://pypi.org/project/run-bounded/)
 [![rust](https://img.shields.io/badge/rust-1.82%2B-lightgrey)](https://github.com/elfenomenokim/run-bounded/blob/main/Cargo.toml)
 [![license](https://img.shields.io/github/license/elfenomenokim/run-bounded)](https://github.com/elfenomenokim/run-bounded/blob/main/LICENSE)
 
@@ -30,17 +31,21 @@ The demo uses `printf` with fixed text. It shows command output, not a benchmark
 ## Install
 
 ```sh
+pipx install run-bounded
+uv tool install run-bounded
+pip install run-bounded
+```
+
+Python 3.10+. Wheels for macOS, Linux and Windows install the `run-bounded` binary and the importable
+Python package `bounded_run`; no Rust toolchain is needed.
+
+From source (Rust 1.82 or newer):
+
+```sh
 git clone https://github.com/elfenomenokim/run-bounded
 cd run-bounded
 cargo install --locked --path .
 ```
-
-`cargo install` puts the `run-bounded` binary in `~/.cargo/bin`. For the Python library, build the
-wheel from the same checkout: `python3 -m pip wheel --no-deps -w dist .` and install the file in
-`dist/`. The package is not on PyPI yet.
-
-Rust 1.82 or newer is needed; the wheel installs the same binary and the importable Python package
-`bounded_run`.
 
 ## Quick start
 
