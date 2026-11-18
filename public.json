@@ -47,7 +47,8 @@
     "docs/demo/run-bounded-dark.gif",
     "docs/demo/frame.png",
     "docs/demo/social.html",
-    "docs/social.png"
+    "docs/social.png",
+    ".github/workflows/claude.yml"
   ],
   "crates_io": "https://crates.io/crates/bounded-run",
   "pypi": "https://pypi.org/project/run-bounded/"
