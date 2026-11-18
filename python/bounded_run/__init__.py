@@ -248,15 +248,18 @@ def _close_windows_job(job) -> None:
 
 def _terminate(proc: subprocess.Popen, job=None) -> None:
     if os.name == "posix":
+        # macOS answers EPERM, not ESRCH, for a group left with only zombies (the leader
+        # was already reaped). Treat both as "nothing left to signal", as the Rust edition does.
+        gone = (ProcessLookupError, PermissionError)
         try: os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError: return
+        except gone: return
         deadline = time.monotonic() + .2
         while time.monotonic() < deadline:
             try: os.killpg(proc.pid, 0)
-            except ProcessLookupError: return
+            except gone: return
             time.sleep(.005)
         try: os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError: pass
+        except gone: pass
     else:
         if job is None:
             proc.kill()

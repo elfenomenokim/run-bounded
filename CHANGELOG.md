@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Python edition on macOS: a timeout whose process group needed SIGKILL could raise
+  `PermissionError` from the cleanup, because macOS answers EPERM for a group left with only
+  zombies. The cleanup now treats it as an empty group, as the Rust edition already did.
+
 ## [0.1.2] - 2026-11-18
 
 ### Changed
