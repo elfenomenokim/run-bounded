@@ -48,8 +48,16 @@
     "docs/demo/frame.png",
     "docs/demo/social.html",
     "docs/social.png",
-    ".github/workflows/claude.yml"
+    ".github/workflows/claude.yml",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "CODE_OF_CONDUCT.md",
+    "CHANGELOG.md",
+    ".github/ISSUE_TEMPLATE/bug_report.yml",
+    ".github/ISSUE_TEMPLATE/feature_request.yml",
+    ".github/ISSUE_TEMPLATE/config.yml",
+    ".github/pull_request_template.md",
+    "docs/logo.svg"
   ],
-  "crates_io": "https://crates.io/crates/bounded-run",
-  "pypi": "https://pypi.org/project/run-bounded/"
+  "crates_io": "https://crates.io/crates/bounded-run"
 }

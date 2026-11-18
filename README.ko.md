@@ -1,7 +1,16 @@
+<img src="https://raw.githubusercontent.com/elfenomenokim/run-bounded/main/docs/logo.svg" width="96" height="96" alt="명령 화살표가 한계 막대에 멈춘 run-bounded 아이콘">
+
 # run-bounded
 [English](README.md)
 
 명령의 실행 시간, 출력량, 프로세스 트리를 제한하는 CLI와 Python 라이브러리입니다.
+
+Rust 1.75+ · Python 3.10+
+
+[![rust](https://img.shields.io/badge/rust-1.75%2B-lightgrey)](https://github.com/elfenomenokim/run-bounded/blob/main/Cargo.toml)
+[![license](https://img.shields.io/github/license/elfenomenokim/run-bounded)](https://github.com/elfenomenokim/run-bounded/blob/main/LICENSE)
+
+한 번 실행에 5.3ms입니다. 같은 명령을 Python `subprocess.run`으로 부르면 37.9ms입니다. 두 값 모두 저장된 30회 `hyperfine` 측정에서 가져왔습니다.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/elfenomenokim/run-bounded/main/docs/demo/run-bounded-dark.gif">
@@ -13,14 +22,17 @@
 ## 설치
 
 ```sh
-pipx install run-bounded
-# or
-uv tool install run-bounded
+git clone https://github.com/elfenomenokim/run-bounded
+cd run-bounded
+cargo install --locked --path .
 ```
 
-wheel에는 Rust CLI `run-bounded`와 가져다 쓸 수 있는 Python 패키지 `bounded_run`이 함께 들어 있습니다.
+`cargo install`은 `run-bounded` 실행 파일을 `~/.cargo/bin`에 넣습니다. Python 라이브러리는 같은 체크아웃에서
+wheel을 만들어 설치합니다. `python3 -m pip wheel --no-deps -w dist .`를 실행하고 `dist/`에 생긴 파일을
+설치하세요. 이 패키지는 아직 PyPI에 올라가 있지 않습니다.
 
-소스에서 설치하려면 Rust 1.75 이상에서 `cargo install --path .`를 실행합니다.
+Rust 1.75 이상이 필요합니다. wheel에는 같은 실행 파일과 가져다 쓸 수 있는 Python 패키지 `bounded_run`이
+함께 들어 있습니다.
 
 ## 빠른 시작
 
@@ -88,10 +100,11 @@ run-bounded [--timeout SEC] [--idle SEC] [--max-output BYTES] -- COMMAND [ARGS..
 
 `COMMAND`에는 절대 경로나 PATH에 있는 명령 이름을 지정합니다. 라이브러리는 `bounded_run.run(command, timeout=60, idle=20, max_output=1048576)`을 제공합니다. 반환값 `RunResult`에는 분류, 실행 시간, 종료 코드, stdout/stderr 바이트와 각각의 잘림 여부가 들어 있습니다. 분류는 `ok`, `failed`, `timeout`, `idle`, `signal`입니다.
 
-## 개발
+## 기여
 
 이 디렉터리에서 `cargo build --locked`를 실행합니다. 이슈와 플랫폼 제보를 환영합니다.
+테스트와 리뷰 방식은 [CONTRIBUTING.md](CONTRIBUTING.md)에 있습니다.
 
 ## 라이선스
 
-MIT. `LICENSE`를 참조하세요.
+MIT입니다. [LICENSE](LICENSE)를 보세요.

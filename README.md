@@ -1,7 +1,16 @@
+<img src="https://raw.githubusercontent.com/elfenomenokim/run-bounded/main/docs/logo.svg" width="96" height="96" alt="run-bounded: a command arrow stopped by a limit">
+
 # run-bounded
 [한국어](README.ko.md)
 
 A command-line tool and Python library for running commands with time, output, and process-tree limits.
+
+Rust 1.75+ · Python 3.10+
+
+[![rust](https://img.shields.io/badge/rust-1.75%2B-lightgrey)](https://github.com/elfenomenokim/run-bounded/blob/main/Cargo.toml)
+[![license](https://img.shields.io/github/license/elfenomenokim/run-bounded)](https://github.com/elfenomenokim/run-bounded/blob/main/LICENSE)
+
+5.3 ms per run; a Python `subprocess.run` call to the same command takes 37.9 ms. Both from the saved 30-run `hyperfine` file.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/elfenomenokim/run-bounded/main/docs/demo/run-bounded-dark.gif">
@@ -13,14 +22,17 @@ The demo uses `printf` with fixed text. It shows command output, not a benchmark
 ## Install
 
 ```sh
-pipx install run-bounded
-# or
-uv tool install run-bounded
+git clone https://github.com/elfenomenokim/run-bounded
+cd run-bounded
+cargo install --locked --path .
 ```
 
-Each wheel installs the Rust `run-bounded` command and the importable Python package `bounded_run`.
+`cargo install` puts the `run-bounded` binary in `~/.cargo/bin`. For the Python library, build the
+wheel from the same checkout: `python3 -m pip wheel --no-deps -w dist .` and install the file in
+`dist/`. The package is not on PyPI yet.
 
-To install from a source checkout, run `cargo install --path .` with Rust 1.75 or newer.
+Rust 1.75 or newer is needed; the wheel installs the same binary and the importable Python package
+`bounded_run`.
 
 ## Quick start
 
@@ -103,7 +115,8 @@ The CLI was built and exercised on macOS 27.0 arm64, Ubuntu 24.04 arm64 on A1, a
 ## Contributing
 
 Run `cargo build --locked` from this directory. Issues and platform reports are welcome.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the tests and the review process.
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [LICENSE](LICENSE).

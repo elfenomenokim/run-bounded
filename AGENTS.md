@@ -14,7 +14,7 @@
 
 - Run `cargo build --locked` from this directory.
 - Run `cargo build --release --locked` for timing measurements.
-- Install the CLI from PyPI with `pipx install run-bounded` or `uv tool install run-bounded`; the wheel includes the Rust command and `bounded_run` Python module.
+- Install from a checkout with `cargo install --locked --path .`; the wheel built by `python3 -m pip wheel --no-deps -w dist .` includes the same Rust command and the `bounded_run` Python module. The package is not published on PyPI or crates.io.
 - Install from a source checkout with `cargo install --path .`.
 - Build a local wheel with `python3 -m pip wheel --no-deps --wheel-dir target/wheels .`.
 - Run the demo with `vhs-safe docs/demo/run-bounded.tape` from the project root.
