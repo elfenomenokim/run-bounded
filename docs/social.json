@@ -1,0 +1,34 @@
+{
+  "name": "run-bounded",
+  "sentence": "A command-line tool and Python library for running commands with time, output, and process-tree limits.",
+  "tag": "RUST · PYTHON",
+  "terminal": [
+    "$ run-bounded --timeout 5 -- /bin/true",
+    "bounded output",
+    "{\"class\":\"ok\",\"duration_ms\":3,\"exit_code\":0}"
+  ],
+  "metric": {
+    "kind": "hyperfine",
+    "source": "docs/bench/macos-27-arm64-20261117.json",
+    "field": "time_wall_clock",
+    "scale": 1000,
+    "title": "Mean launch time",
+    "basis": "M5 · 15 runs · /usr/bin/true",
+    "unit": "ms",
+    "precision": 1,
+    "items": [
+      {
+        "label": "run-bounded",
+        "match": "run-bounded --timeout 5 --idle 2"
+      },
+      {
+        "label": "gtimeout",
+        "match": "/opt/homebrew/bin/gtimeout 5"
+      },
+      {
+        "label": "Python subprocess",
+        "match": "subprocess.run"
+      }
+    ]
+  }
+}
