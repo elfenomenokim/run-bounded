@@ -18,10 +18,12 @@ Rust 1.75+ · Python 3.10+
 
 </div>
 
+<p align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/elfenomenokim/run-bounded/main/docs/demo/run-bounded-dark.gif">
   <img src="https://raw.githubusercontent.com/elfenomenokim/run-bounded/main/docs/demo/run-bounded.gif" alt="The run-bounded CLI prints child output and a JSON result" width="1200">
 </picture>
+</p>
 
 The demo uses `printf` with fixed text. It shows command output, not a benchmark.
 

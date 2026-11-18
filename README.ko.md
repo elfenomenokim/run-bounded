@@ -18,10 +18,12 @@ Rust 1.75+ · Python 3.10+
 
 </div>
 
+<p align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/elfenomenokim/run-bounded/main/docs/demo/run-bounded-dark.gif">
   <img src="https://raw.githubusercontent.com/elfenomenokim/run-bounded/main/docs/demo/run-bounded.gif" alt="run-bounded가 자식 명령의 출력과 JSON 결과를 보여 주는 화면" width="1200">
 </picture>
+</p>
 
 데모는 정해진 문자열을 `printf`로 출력합니다. 측정 화면은 아닙니다.
 
