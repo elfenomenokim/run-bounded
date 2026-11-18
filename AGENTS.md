@@ -5,7 +5,7 @@
 - `src/main.rs`: Rust CLI and process lifecycle.
 - `python/bounded_run/`: importable Python library.
 - `docs/demo/`: VHS tapes, recorded demos, and social-preview source image.
-- `pyproject.toml` and `.github/workflows/wheels.yml`: PyPI package and wheel publishing workflow.
+- `pyproject.toml` and `.github/workflows/`: PyPI package workflow and the automatic pull request review.
 - `docs/bench/`: saved benchmark results.
 - `docs/diagrams/`: Mermaid sources and light/dark SVG output.
 - `public.json`: exported public files.
@@ -34,3 +34,17 @@
 - Keep dependency versions locked in Cargo.lock and build with `--locked`.
 - Keep the CLI and Python library result classes and cap semantics aligned.
 - Regenerate charts from the saved benchmark JSON; do not type benchmark values into graph sources.
+
+## Code Review Rules
+
+A change is a real defect when it:
+
+- lets a child process or its process group survive a timeout, an idle timeout or a parent exit on any platform.
+- drops or interleaves child stdout and stderr, or loses bytes when a consumer stops reading.
+- breaks an output cap, an idle deadline, or the absolute-path rule for the executable.
+- changes a documented exit code: 124 for timeout and idle, 128 + signal number for a signal death.
+- writes the JSON result to stdout instead of stderr, or emits a result that does not parse.
+- leaves the CLI and the Python library disagreeing on result fields or cap semantics.
+- inherits the full parent environment again, or resolves a relative path or a PATH entry the tool must reject.
+
+Not defects: wording, formatting, type annotations, comment style, requested extra tests, or a renamed helper.

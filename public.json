@@ -42,6 +42,7 @@
     "docs/diagrams/bench.ko.dark.svg",
     "pyproject.toml",
     ".github/workflows/wheels.yml",
+    ".github/workflows/opencode-review.yml",
     "docs/demo/run-bounded-dark.tape",
     "docs/demo/run-bounded-dark.gif",
     "docs/demo/frame.png",
