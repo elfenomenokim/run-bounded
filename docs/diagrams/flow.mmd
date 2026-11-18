@@ -1,0 +1,9 @@
+flowchart TD
+    A[Absolute command and minimal environment] --> B[Start process group or Windows Job Object]
+    B --> C[Drain stdout and stderr concurrently]
+    C --> D{Child and both streams finished?}
+    D -- yes --> E[Return exit classification and duration]
+    D -- no --> F{Wall or idle deadline reached?}
+    F -- no --> C
+    F -- yes --> G[Terminate the whole process tree]
+    G --> H[Return timeout or idle result]
