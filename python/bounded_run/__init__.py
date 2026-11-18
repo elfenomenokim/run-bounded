@@ -154,7 +154,7 @@ def _terminate(proc: subprocess.Popen, job=None) -> None:
             try: os.killpg(proc.pid, 0)
             except ProcessLookupError: return
             time.sleep(.005)
-        try: os.killpg(proc.pid, signal.SIGKILL)
+        try: os.killpg(proc.pid, signal.SIGTERM)
         except ProcessLookupError: pass
     else:
         if job is None:
