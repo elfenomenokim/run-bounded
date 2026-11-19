@@ -58,13 +58,62 @@ def _restore_stop_handlers(previous) -> None:
             pass
 
 
-def run(command: Sequence[str], *, timeout: float = 60, idle: float = 20,
-        max_output: int = 1_048_576, env: dict[str, str] | None = None) -> RunResult:
+def _resolve_stdin(stdin: object, input_data: bytes | str | None) -> tuple[object, bytes | None]:
+    """Resolve Popen stdin target and optional bytes to feed before closing."""
+    if input_data is not None:
+        if stdin is not None and stdin not in ("null", subprocess.DEVNULL):
+            raise ValueError("cannot pass both stdin and input")
+        if isinstance(input_data, str):
+            raw = input_data.encode("utf-8")
+        elif isinstance(input_data, (bytes, bytearray, memoryview)):
+            raw = bytes(input_data)
+        else:
+            raise TypeError("input must be bytes or str")
+        if not raw:
+            return subprocess.DEVNULL, None
+        return subprocess.PIPE, raw
+    if stdin is None or stdin == "null" or stdin == subprocess.DEVNULL:
+        return subprocess.DEVNULL, None
+    if stdin == "inherit":
+        return None, None
+    if isinstance(stdin, int) and not isinstance(stdin, bool) and stdin >= 0:
+        return stdin, None
+    if hasattr(stdin, "fileno"):
+        return stdin, None
+    raise ValueError(f"invalid stdin mode: {stdin!r}")
+
+
+def run(
+    command: Sequence[str],
+    *,
+    timeout: float = 60,
+    idle: float = 20,
+    max_output: int = 1_048_576,
+    max_stdout: int | None = None,
+    max_stderr: int | None = None,
+    kill_on_cap: bool = False,
+    cwd: str | os.PathLike[str] | None = None,
+    stdin: object = None,
+    input: bytes | str | None = None,
+    env: dict[str, str] | None = None,
+) -> RunResult:
     """Execute an absolute or PATH-resolved command with independent stream caps."""
     if not command:
         raise ValueError("command must not be empty")
-    if timeout < 0 or idle < 0 or max_output < 0:
+    if (
+        timeout < 0
+        or idle < 0
+        or max_output < 0
+        or (max_stdout is not None and max_stdout < 0)
+        or (max_stderr is not None and max_stderr < 0)
+    ):
         raise ValueError("limits must be nonnegative")
+    caps = (
+        max_output if max_stdout is None else max_stdout,
+        max_output if max_stderr is None else max_stderr,
+    )
+    popen_stdin, input_bytes = _resolve_stdin(stdin, input)
+    popen_cwd = os.fspath(cwd) if cwd is not None else None
     start = time.monotonic()
     minimal = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SYSTEMROOT", "WINDIR", "TEMP", "TMP"}}
     if env is not None: minimal.update(env)
@@ -76,8 +125,15 @@ def run(command: Sequence[str], *, timeout: float = 60, idle: float = 20,
         if executable is None:
             raise FileNotFoundError(f"command not found on PATH: {command[0]}")
         command = (executable, *command[1:])
-    proc = subprocess.Popen(command, stdin=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            env=minimal, start_new_session=(os.name == "posix"))
+    proc = subprocess.Popen(
+        command,
+        stdin=popen_stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=popen_cwd,
+        env=minimal,
+        start_new_session=(os.name == "posix"),
+    )
     job = None
     if os.name == "nt":
         try:
@@ -85,14 +141,33 @@ def run(command: Sequence[str], *, timeout: float = 60, idle: float = 20,
         except OSError:
             proc.kill()
             proc.wait()
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
             raise
+    feeder = None
+    if input_bytes is not None and proc.stdin is not None:
+        def feed_stdin(pipe=proc.stdin, data=input_bytes):
+            try:
+                pipe.write(data)
+                pipe.flush()
+            except OSError:
+                pass
+            finally:
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
+        feeder = threading.Thread(target=feed_stdin, daemon=True)
+        feeder.start()
     last_output = [start]
+    cap_exceeded = [False]
     lock = threading.Lock()
     wake = threading.Event()
     child_done = threading.Event()
     reader_done = [False, False]
     streams: list[tuple[bytearray, bool]] = [(bytearray(), False), (bytearray(), False)]
-    def drain(pipe, index):
+    def drain(pipe, index, cap):
         try:
             while True:
                 chunk = os.read(pipe.fileno(), 8192)
@@ -100,18 +175,25 @@ def run(command: Sequence[str], *, timeout: float = 60, idle: float = 20,
                     return
                 with lock:
                     last_output[0] = time.monotonic()
-                    buf, _ = streams[index]
-                    room = max_output - len(buf)
-                    buf.extend(chunk[:max(room, 0)])
-                    if len(chunk) > room:
+                    buf, truncated = streams[index]
+                    room = cap - len(buf)
+                    if room > 0:
+                        buf.extend(chunk[:room])
+                    if len(chunk) > room and not truncated:
                         streams[index] = (buf, True)
+                        if kill_on_cap:
+                            cap_exceeded[0] = True
                 wake.set()
         finally:
+            try:
+                pipe.close()
+            except OSError:
+                pass
             with lock:
                 reader_done[index] = True
             wake.set()
-    threads = [threading.Thread(target=drain, args=(proc.stdout, 0), daemon=True),
-               threading.Thread(target=drain, args=(proc.stderr, 1), daemon=True)]
+    threads = [threading.Thread(target=drain, args=(proc.stdout, 0, caps[0]), daemon=True),
+               threading.Thread(target=drain, args=(proc.stderr, 1, caps[1]), daemon=True)]
     for t in threads: t.start()
     def wait_child():
         proc.wait()
@@ -130,13 +212,20 @@ def run(command: Sequence[str], *, timeout: float = 60, idle: float = 20,
             with lock:
                 complete = child_done.is_set() and all(reader_done)
                 last = last_output[0]
+                hit_cap = cap_exceeded[0]
             if complete:
                 code = proc.returncode
                 if not killed:
-                    classification = "ok" if code == 0 else ("signal" if code < 0 else "failed")
+                    if kill_on_cap and hit_cap:
+                        classification = "output_limit"
+                    else:
+                        classification = "ok" if code == 0 else ("signal" if code < 0 else "failed")
                 break
             now = time.monotonic()
-            if not killed and timeout and now - start >= timeout:
+            if not killed and kill_on_cap and hit_cap:
+                classification = "output_limit"; _terminate(proc, job); killed = True
+                drain_until = now + DRAIN_GRACE
+            elif not killed and timeout and now - start >= timeout:
                 classification = "timeout"; _terminate(proc, job); killed = True
                 drain_until = now + DRAIN_GRACE
             elif not killed and idle and now - last >= idle:
@@ -160,6 +249,8 @@ def run(command: Sequence[str], *, timeout: float = 60, idle: float = 20,
         if not child_done.is_set():
             _terminate(proc, job)
     grace_end = time.monotonic() + DRAIN_GRACE
+    if feeder is not None:
+        feeder.join(max(0, grace_end - time.monotonic()))
     for t in threads:
         t.join(max(0, grace_end - time.monotonic()))
     waiter.join(DRAIN_GRACE)

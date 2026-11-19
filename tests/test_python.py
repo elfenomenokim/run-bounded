@@ -4,7 +4,9 @@ Run with: python3 tests/test_python.py
 """
 
 import os
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 
@@ -60,6 +62,112 @@ class TermResistantGroupTest(unittest.TestCase):
             with os.popen(f"ps -p {child} -o stat=") as ps:
                 state = ps.read().strip()
             self.assertTrue(not state or state.startswith("Z"), f"descendant {child} still running")
+
+
+class OptionsAndCapsTest(unittest.TestCase):
+    def test_stdin_closed_by_default_and_input_or_inherit(self):
+        res = run([sys.executable, "-c", "import sys; sys.stdout.write(repr(sys.stdin.read()))"], timeout=5)
+        self.assertEqual(res.classification, "ok")
+        self.assertEqual(res.stdout, b"''")
+
+        res_str = run(["/bin/cat"], timeout=5, input="hello\n")
+        self.assertEqual(res_str.classification, "ok")
+        self.assertEqual(res_str.stdout, b"hello\n")
+
+        res_bytes = run(["/bin/cat"], timeout=5, input=b"\x00\x01ok")
+        self.assertEqual(res_bytes.classification, "ok")
+        self.assertEqual(res_bytes.stdout, b"\x00\x01ok")
+
+        res_ignored = run(["/usr/bin/true"], timeout=5, input="x" * 200_000)
+        self.assertEqual(res_ignored.classification, "ok")
+
+        # Verify stdin="inherit" passes parent's stdin through to the child.
+        python_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "python")
+        probe = (
+            f"import sys; sys.path.insert(0, {python_dir!r}); "
+            "from bounded_run import run; "
+            "r = run(['/bin/cat'], timeout=5, stdin='inherit'); "
+            "sys.stdout.buffer.write(r.stdout)"
+        )
+        inherited = subprocess.run(
+            [sys.executable, "-c", probe],
+            input=b"inherited-from-parent\n",
+            capture_output=True,
+            check=True,
+        )
+        self.assertEqual(inherited.stdout, b"inherited-from-parent\n")
+
+        with self.assertRaises(ValueError):
+            run(["/usr/bin/true"], stdin="inherit", input="conflict")
+
+    def test_cwd_sets_working_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            res = run([sys.executable, "-c", "import os; print(os.getcwd())"], timeout=5, cwd=tmp)
+            self.assertEqual(res.classification, "ok")
+            self.assertEqual(res.stdout.decode().strip(), os.path.realpath(tmp))
+
+    def test_separate_stdout_and_stderr_caps(self):
+        res = run(
+            [sys.executable, "-c", "import sys; sys.stdout.write('12345678'); sys.stderr.write('abcdefgh')"],
+            timeout=5,
+            max_stdout=5,
+            max_stderr=10,
+        )
+        self.assertEqual(res.classification, "ok")
+        self.assertEqual(res.stdout, b"12345")
+        self.assertEqual(res.stderr, b"abcdefgh")
+        self.assertTrue(res.stdout_truncated)
+        self.assertFalse(res.stderr_truncated)
+
+    @unittest.skipUnless(os.name == "posix", "process-group check")
+    def test_kill_on_cap_terminates_group_and_reports_output_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = os.path.join(tmp, "child.pid")
+            program = (
+                "import signal, subprocess, sys, time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "child = subprocess.Popen([sys.executable, '-c', "
+                "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)']); "
+                "open(sys.argv[1], 'w').write(str(child.pid)); "
+                "sys.stderr.write('0123456789abcdef'); sys.stderr.flush(); time.sleep(30)"
+            )
+            started = time.monotonic()
+            res = run(
+                [sys.executable, "-c", program, pid_file],
+                timeout=10,
+                idle=0,
+                max_stdout=100,
+                max_stderr=8,
+                kill_on_cap=True,
+            )
+            elapsed = time.monotonic() - started
+            self.assertEqual(res.classification, "output_limit")
+            self.assertFalse(res.stdout_truncated)
+            self.assertTrue(res.stderr_truncated)
+            self.assertEqual(res.stderr, b"01234567")
+            self.assertLess(elapsed, 3.0)
+            with open(pid_file) as fh:
+                child = int(fh.read())
+            for _ in range(40):
+                try:
+                    os.kill(child, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.025)
+            with os.popen(f"ps -p {child} -o stat=") as ps:
+                state = ps.read().strip()
+            self.assertTrue(not state or state.startswith("Z"), f"descendant {child} still running")
+
+    def test_kill_on_cap_reports_output_limit_even_if_child_exits_immediately(self):
+        res = run(
+            [sys.executable, "-c", "import sys; sys.stdout.write('0123456789')"],
+            timeout=5,
+            max_output=4,
+            kill_on_cap=True,
+        )
+        self.assertEqual(res.classification, "output_limit")
+        self.assertTrue(res.stdout_truncated)
+        self.assertEqual(res.stdout, b"0123")
 
 
 if __name__ == "__main__":

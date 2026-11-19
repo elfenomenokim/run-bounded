@@ -1,6 +1,6 @@
 [package]
 name = "bounded-run"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 rust-version = "1.82"
 description = "A command-line tool for running commands with time, output, and process-tree limits."

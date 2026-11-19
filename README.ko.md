@@ -62,7 +62,18 @@ bounded output
 {"class":"ok","duration_ms":6,"exit_code":0,"stdout_truncated":false,"stderr_truncated":false}
 ```
 
-`--timeout`은 전체 실행 시간(초), `--idle`은 출력이 없을 때의 제한 시간(초)입니다. `--max-output`은 stdout과 stderr 각각에 적용되는 바이트 상한입니다. K, M, G는 1024의 거듭제곱 단위입니다. 시간 제한에 0을 주면 해당 제한을 끕니다. 자식에는 PATH, 로캘, 홈, 임시 디렉터리, Windows 시스템 변수를 전달합니다.
+`--timeout`은 전체 실행 시간(초), `--idle`은 출력이 없을 때의 제한 시간(초)입니다. `--max-output`은 stdout과 stderr의 기본 바이트 상한이며, `--max-stdout`과 `--max-stderr`로 스트림별 상한을 따로 줄 수 있습니다. K, M, G는 1024의 거듭제곱 단위입니다. 시간 제한에 0을 주면 해당 제한을 끕니다. `--stdin inherit`이나 `--input`을 지정하지 않으면 자식 `stdin`은 닫힌 상태로 시작합니다. 자식에는 PATH, 로캘, 홈, 임시 디렉터리, Windows 시스템 변수를 전달합니다.
+
+작업 디렉터리 지정, 스트림별 상한, 입력 전달, 상한 초과 시 종료를 함께 쓰는 예입니다.
+
+```sh
+run-bounded --cwd /tmp --input $'line 1\nline 2\n' --max-stdout 7 --max-stderr 256 --kill-on-cap -- cat
+```
+
+```text
+line 1
+{"class":"output_limit","duration_ms":5,"exit_code":0,"stdout_truncated":true,"stderr_truncated":false}
+```
 
 ## 비교
 
@@ -103,15 +114,17 @@ bounded output
 
 ## 플랫폼
 
-CLI는 macOS 27.0 arm64, A1의 Ubuntu 24.04 arm64, Windows 빌드 26340 x64(보고된 OS 버전 10.0.26340.0)에서 빌드와 동작을 확인했습니다. Python 라이브러리는 macOS와 Windows에서 확인했습니다. Windows Rust 빌드는 노트북에 이미 설치된 Rust 1.100 GNU 툴체인으로 진행했습니다. 시간 초과와 유휴 시간 초과는 124, CLI 오류는 125를 반환합니다. 일반 실패는 자식의 종료 코드를 유지합니다. 시그널로 종료된 자식은 128에 시그널 번호를 더한 값을 반환하고, JSON `exit_code`는 null입니다. 출력을 읽지 않는 소비자는 시간 초과 결과를 지연시킬 수 없습니다. 제한이 자식을 종료하면 두 에디션 모두 막힌 출력 쓰기나 프로세스 그룹을 떠난 자손을 기다리지 않고 시간 초과를 보고합니다. 실행기 자체가 SIGINT, SIGTERM, SIGHUP을 받으면 자식 트리를 먼저 종료합니다. Windows 작업 객체는 실행기가 닫힐 때도 자식을 종료합니다.
+CLI는 macOS 27.0 arm64, A1의 Ubuntu 24.04 arm64, Windows 빌드 26340 x64(보고된 OS 버전 10.0.26340.0)에서 빌드와 동작을 확인했습니다. Python 라이브러리는 macOS와 Windows에서 확인했습니다. Windows Rust 빌드는 노트북에 이미 설치된 Rust 1.100 GNU 툴체인으로 진행했습니다. 시간 초과와 유휴 시간 초과는 124, 출력 상한 초과 종료는 1, CLI 오류는 125를 반환합니다. 일반 실패는 자식의 종료 코드를 유지합니다. 시그널로 종료된 자식은 128에 시그널 번호를 더한 값을 반환하고, JSON `exit_code`는 null입니다. 출력을 읽지 않는 소비자는 시간 초과 결과를 지연시킬 수 없습니다. 제한이 자식을 종료하면 두 에디션 모두 막힌 출력 쓰기나 프로세스 그룹을 떠난 자손을 기다리지 않고 시간 초과를 보고합니다. 실행기 자체가 SIGINT, SIGTERM, SIGHUP을 받으면 자식 트리를 먼저 종료합니다. Windows 작업 객체는 실행기가 닫힐 때도 자식을 종료합니다.
 
 ## 명령 형식
 
 ```text
-run-bounded [--timeout SEC] [--idle SEC] [--max-output BYTES] -- COMMAND [ARGS...]
+run-bounded [--timeout SEC] [--idle SEC] [--max-output BYTES] [--max-stdout BYTES] [--max-stderr BYTES] [--kill-on-cap] [--cwd DIR] [--stdin null|inherit] [--input TEXT] -- COMMAND [ARGS...]
 ```
 
-`COMMAND`에는 절대 경로나 PATH에 있는 명령 이름을 지정합니다. 라이브러리는 `bounded_run.run(command, timeout=60, idle=20, max_output=1048576)`을 제공합니다. 반환값 `RunResult`에는 분류, 실행 시간, 종료 코드, stdout/stderr 바이트와 각각의 잘림 여부가 들어 있습니다. 분류는 `ok`, `failed`, `timeout`, `idle`, `signal`입니다.
+`COMMAND`에는 절대 경로나 PATH에 있는 명령 이름을 지정합니다. `--cwd`는 작업 디렉터리를 바꿉니다. `--stdin` 기본값은 `null`(닫힘)이며, 부모 입력을 이어받으려면 `inherit`, UTF-8 텍스트를 넣고 닫으려면 `--input`을 씁니다. `--max-stdout`과 `--max-stderr`는 `--max-output`을 스트림별로 덮어씁니다. `--kill-on-cap`을 켜면 어느 한 스트림이라도 상한을 넘겼을 때 프로세스 그룹이나 Job Object를 종료하고 `output_limit`으로 분류하며 종료 코드 1을 반환합니다.
+
+라이브러리는 `bounded_run.run(command, *, timeout=60, idle=20, max_output=1048576, max_stdout=None, max_stderr=None, kill_on_cap=False, cwd=None, stdin=None, input=None, env=None)`을 제공합니다. `stdin` 기본값은 닫힘(`DEVNULL`)이고 `"inherit"`이나 읽을 수 있는 파일/fd를 받으며, `input`은 `bytes` 또는 `str`을 받습니다. 반환값 `RunResult`에는 분류, 실행 시간, 종료 코드, stdout/stderr 바이트와 각각의 잘림 여부가 들어 있습니다. 분류는 `ok`, `failed`, `timeout`, `idle`, `output_limit`, `signal`입니다.
 
 ## 기여
 

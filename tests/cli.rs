@@ -2,7 +2,7 @@
 //! not delay the timeout result, and a signal death must keep its signal.
 #![cfg(unix)]
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -115,5 +115,159 @@ fn a_runner_signal_terminates_the_child_group() {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn stdin_is_closed_by_default_and_can_inherit_or_take_input() {
+    let mut default_child = Command::new(binary())
+        .args(["--", "/bin/cat"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn run-bounded");
+    default_child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"should-not-arrive\n")
+        .unwrap();
+    let default_out = default_child.wait_with_output().expect("wait");
+    assert_eq!(default_out.status.code(), Some(0));
+    assert!(default_out.stdout.is_empty());
+
+    let mut inherit_child = Command::new(binary())
+        .args(["--stdin", "inherit", "--", "/bin/cat"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn run-bounded");
+    inherit_child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"from-parent\n")
+        .unwrap();
+    let inherit_out = inherit_child.wait_with_output().expect("wait");
+    assert_eq!(inherit_out.status.code(), Some(0));
+    assert_eq!(inherit_out.stdout, b"from-parent\n");
+
+    let input_out = Command::new(binary())
+        .args(["--input", "from-flag\n", "--", "/bin/cat"])
+        .output()
+        .expect("spawn run-bounded");
+    assert_eq!(input_out.status.code(), Some(0));
+    assert_eq!(input_out.stdout, b"from-flag\n");
+
+    let large_input = "x".repeat(131_072);
+    let ignored_input_out = Command::new(binary())
+        .args(["--input", &large_input, "--", "/usr/bin/true"])
+        .output()
+        .expect("spawn run-bounded");
+    assert_eq!(ignored_input_out.status.code(), Some(0));
+
+    let conflict_out = Command::new(binary())
+        .args(["--stdin", "inherit", "--input", "x", "--", "/usr/bin/true"])
+        .output()
+        .expect("spawn run-bounded");
+    assert_eq!(conflict_out.status.code(), Some(125));
+}
+
+#[test]
+fn cwd_sets_working_directory() {
+    let dir = std::env::temp_dir().join(format!("run-bounded-cwd-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create cwd dir");
+    let canonical = std::fs::canonicalize(&dir).expect("canonicalize cwd");
+
+    let output = Command::new(binary())
+        .args(["--cwd"])
+        .arg(&dir)
+        .args(["--", "/bin/pwd"])
+        .output()
+        .expect("spawn run-bounded");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(output.status.code(), Some(0));
+    let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(actual, canonical.to_string_lossy());
+}
+
+#[test]
+fn separate_stdout_and_stderr_caps_truncate_independently() {
+    let output = Command::new(binary())
+        .args([
+            "--max-stdout",
+            "5",
+            "--max-stderr",
+            "10",
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf '12345678'; printf 'abcdefgh' >&2",
+        ])
+        .output()
+        .expect("spawn run-bounded");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"12345");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.starts_with("abcdefgh{"), "stderr: {stderr}");
+    assert!(stderr.contains("\"class\":\"ok\""), "stderr: {stderr}");
+    assert!(stderr.contains("\"stdout_truncated\":true"), "stderr: {stderr}");
+    assert!(stderr.contains("\"stderr_truncated\":false"), "stderr: {stderr}");
+}
+
+#[test]
+fn kill_on_cap_terminates_process_group_and_reports_output_limit() {
+    let dir = std::env::temp_dir().join(format!("run-bounded-cap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create pid dir");
+    let pidfile = dir.join("child.pid");
+    let script = format!(
+        "sleep 30 & echo $! > '{}'; printf '0123456789abcdef' >&2; sleep 30",
+        pidfile.display()
+    );
+    let started = Instant::now();
+    let output = Command::new(binary())
+        .args([
+            "--timeout",
+            "10",
+            "--idle",
+            "0",
+            "--max-stdout",
+            "100",
+            "--max-stderr",
+            "8",
+            "--kill-on-cap",
+            "--",
+            "/bin/sh",
+            "-c",
+            &script,
+        ])
+        .output()
+        .expect("spawn run-bounded");
+    let elapsed = started.elapsed();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(elapsed < Duration::from_secs(3), "elapsed: {elapsed:?}");
+    assert!(stderr.contains("\"class\":\"output_limit\""), "stderr: {stderr}");
+    assert!(stderr.contains("\"stdout_truncated\":false"), "stderr: {stderr}");
+    assert!(stderr.contains("\"stderr_truncated\":true"), "stderr: {stderr}");
+
+    let child_pid: i32 = std::fs::read_to_string(&pidfile)
+        .expect("read descendant pidfile")
+        .trim()
+        .parse()
+        .expect("parse descendant pid");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if unsafe { libc::kill(child_pid, 0) } != 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_ne!(unsafe { libc::kill(child_pid, 0) }, 0, "descendant survived kill-on-cap");
     let _ = std::fs::remove_dir_all(&dir);
 }

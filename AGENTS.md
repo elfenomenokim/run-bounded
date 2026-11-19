@@ -22,12 +22,12 @@
 
 ## Implementation rules
 
-- Keep child stdout and stderr independent and drain both while enforcing caps.
+- Keep child `stdin` closed by default unless `inherit` or `input` is requested; keep child stdout and stderr independent and drain both while enforcing per-stream caps (`--max-stdout`/`--max-stderr`, defaulting to `--max-output`).
 - Accept absolute executable paths and bare names resolved through PATH; reject relative paths containing `/` or `\`. Pass only the documented minimal environment.
 - Unix cleanup must signal the process group, not only the direct child, and a signal that stops the runner must do the same.
 - Windows cleanup must use a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` in both editions.
 - Keep the JSON result on stderr so child stdout remains usable as command output.
-- Preserve exit codes for child failures; timeout and idle use 124; a signal death returns 128 + the signal number.
+- Preserve exit codes for child failures; timeout and idle use 124; `output_limit` (when `--kill-on-cap` stops the child) uses 1; a signal death returns 128 + the signal number.
 - A deadline kill must report its timeout even when output forwarding is blocked on a consumer that stopped reading, in both editions.
 - A limit value outside the representable duration range is a CLI error (125), never a panic.
 - Never put real home paths, hostnames, credentials, or account data in demo inputs.
@@ -44,7 +44,7 @@ A change is a real defect when it:
 - lets a child process or its process group survive a timeout, an idle timeout or a parent exit on any platform.
 - drops or interleaves child stdout and stderr, or loses bytes when a consumer stops reading.
 - breaks an output cap, an idle deadline, or the absolute-path rule for the executable.
-- changes a documented exit code: 124 for timeout and idle, 128 + signal number for a signal death.
+- changes a documented exit code: 124 for timeout and idle, 1 for `output_limit`, 128 + signal number for a signal death.
 - writes the JSON result to stdout instead of stderr, or emits a result that does not parse.
 - leaves the CLI and the Python library disagreeing on result fields or cap semantics.
 - inherits the full parent environment again, or resolves a relative path or a PATH entry the tool must reject.

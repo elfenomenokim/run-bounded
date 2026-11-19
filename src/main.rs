@@ -88,6 +88,7 @@ use std::{
 
 enum Event {
     Output(Instant),
+    CapExceeded,
     StreamDone,
     Exited(io::Result<ExitStatus>),
 }
@@ -132,34 +133,77 @@ fn run() -> Result<(ResultRow, i32), String> {
     let mut timeout = 60f64;
     let mut idle = 20f64;
     let mut cap = 1_048_576usize;
+    let mut max_stdout: Option<usize> = None;
+    let mut max_stderr: Option<usize> = None;
+    let mut kill_on_cap = false;
+    let mut cwd: Option<String> = None;
+    let mut stdin_mode: Option<String> = None;
+    let mut input_text: Option<String> = None;
     let mut args = env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--timeout" => timeout = parse(&args.next().ok_or("missing --timeout")?)?,
             "--idle" => idle = parse(&args.next().ok_or("missing --idle")?)?,
             "--max-output" => cap = parse_size(&args.next().ok_or("missing --max-output")?)?,
+            "--max-stdout" => max_stdout = Some(parse_size(&args.next().ok_or("missing --max-stdout")?)?),
+            "--max-stderr" => max_stderr = Some(parse_size(&args.next().ok_or("missing --max-stderr")?)?),
+            "--kill-on-cap" => kill_on_cap = true,
+            "--cwd" => {
+                let dir = args.next().ok_or("missing --cwd")?;
+                if dir.is_empty() {
+                    return Err("invalid --cwd: path must not be empty".into());
+                }
+                cwd = Some(dir);
+            }
+            "--stdin" => {
+                let mode = args.next().ok_or("missing --stdin")?;
+                if mode != "null" && mode != "inherit" {
+                    return Err(format!("invalid --stdin mode: {mode} (expected null or inherit)"));
+                }
+                stdin_mode = Some(mode);
+            }
+            "--input" => input_text = Some(args.next().ok_or("missing --input")?),
             "--" => break,
             _ => return Err(format!("unknown option {a}")),
         }
     }
+    if stdin_mode.as_deref() == Some("inherit") && input_text.is_some() {
+        return Err("--stdin inherit cannot be combined with --input".into());
+    }
     let command: Vec<String> = args.collect();
     if command.is_empty() {
-        return Err("usage: run-bounded [--timeout SEC] [--idle SEC] [--max-output BYTES] -- COMMAND [ARGS...]".into());
+        return Err("usage: run-bounded [--timeout SEC] [--idle SEC] [--max-output BYTES] [--max-stdout BYTES] [--max-stderr BYTES] [--kill-on-cap] [--cwd DIR] [--stdin null|inherit] [--input TEXT] -- COMMAND [ARGS...]".into());
     }
     if !std::path::Path::new(&command[0]).is_absolute()
         && (command[0].contains('/') || command[0].contains('\\'))
     {
         return Err("relative command paths with a separator are not accepted; use a bare PATH name or an absolute path".into());
     }
+    let stdout_cap = max_stdout.unwrap_or(cap);
+    let stderr_cap = max_stderr.unwrap_or(cap);
+    let stdin_stdio = if let Some(ref text) = input_text {
+        if text.is_empty() {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        }
+    } else if stdin_mode.as_deref() == Some("inherit") {
+        Stdio::inherit()
+    } else {
+        Stdio::null()
+    };
     let start = Instant::now();
     #[cfg(unix)]
     install_signal_handlers();
     let mut cmd = Command::new(&command[0]);
     cmd.args(&command[1..])
         .env_clear()
-        .stdin(Stdio::inherit())
+        .stdin(stdin_stdio)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(ref dir) = cwd {
+        cmd.current_dir(dir);
+    }
     for key in [
         "PATH",
         "HOME",
@@ -210,13 +254,21 @@ fn run() -> Result<(ResultRow, i32), String> {
             ));
         }
     };
+    if let Some(data) = input_text.filter(|t| !t.is_empty()).map(String::into_bytes) {
+        if let Some(mut stdin_pipe) = child.stdin.take() {
+            thread::spawn(move || {
+                let _ = stdin_pipe.write_all(&data);
+                let _ = stdin_pipe.flush();
+            });
+        }
+    }
     let out = child.stdout.take().unwrap();
     let err = child.stderr.take().unwrap();
     let out_count = Arc::new(AtomicUsize::new(0));
     let err_count = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = mpsc::channel();
-    let a = reader(out, out_count.clone(), cap, tx.clone(), io::stdout());
-    let b = reader(err, err_count.clone(), cap, tx.clone(), io::stderr());
+    let a = reader(out, out_count.clone(), stdout_cap, kill_on_cap, tx.clone(), io::stdout());
+    let b = reader(err, err_count.clone(), stderr_cap, kill_on_cap, tx.clone(), io::stderr());
     let waiter = thread::spawn(move || {
         let _ = tx.send(Event::Exited(child.wait()));
     });
@@ -243,6 +295,16 @@ fn run() -> Result<(ResultRow, i32), String> {
         };
         match event {
             Ok(Event::Output(at)) => last_output = at,
+            Ok(Event::CapExceeded) => {
+                if !killed {
+                    class = "output_limit";
+                    #[cfg(unix)]
+                    terminate_current(pid);
+                    #[cfg(windows)]
+                    terminate_current(job);
+                    killed = true;
+                }
+            }
             Ok(Event::StreamDone) => stream_count += 1,
             Ok(Event::Exited(result)) => status = Some(result),
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -285,8 +347,12 @@ fn run() -> Result<(ResultRow, i32), String> {
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .and_then(terminating_signal);
+    let stdout_truncated = out_count.load(Ordering::SeqCst) > stdout_cap;
+    let stderr_truncated = err_count.load(Ordering::SeqCst) > stderr_cap;
     if !killed {
-        if let Some(Ok(s)) = status.as_ref() {
+        if kill_on_cap && (stdout_truncated || stderr_truncated) {
+            class = "output_limit";
+        } else if let Some(Ok(s)) = status.as_ref() {
             if s.success() {
                 class = "ok"
             } else if s.code().is_some() {
@@ -300,12 +366,13 @@ fn run() -> Result<(ResultRow, i32), String> {
         class,
         duration_ms: start.elapsed().as_millis(),
         exit_code: exit,
-        stdout_truncated: out_count.load(Ordering::Relaxed) > cap,
-        stderr_truncated: err_count.load(Ordering::Relaxed) > cap,
+        stdout_truncated,
+        stderr_truncated,
     };
     let code = match class {
         "ok" => 0,
         "timeout" | "idle" => 124,
+        "output_limit" => 1,
         "signal" => 128 + signal.unwrap_or(1),
         _ => exit.unwrap_or(1),
     };
@@ -315,6 +382,7 @@ fn reader<R: Read + Send + 'static, W: Write + Send + 'static>(
     mut input: R,
     count: Arc<AtomicUsize>,
     cap: usize,
+    kill_on_cap: bool,
     tx: mpsc::Sender<Event>,
     mut output: W,
 ) -> thread::JoinHandle<()> {
@@ -325,7 +393,10 @@ fn reader<R: Read + Send + 'static, W: Write + Send + 'static>(
                 break;
             }
             let _ = tx.send(Event::Output(Instant::now()));
-            let previous = count.fetch_add(n, Ordering::Relaxed);
+            let previous = count.fetch_add(n, Ordering::SeqCst);
+            if kill_on_cap && previous <= cap && previous.saturating_add(n) > cap {
+                let _ = tx.send(Event::CapExceeded);
+            }
             if previous < cap {
                 let keep = (cap - previous).min(n);
                 let _ = output.write_all(&buf[..keep]);

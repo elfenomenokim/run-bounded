@@ -62,7 +62,18 @@ bounded output
 {"class":"ok","duration_ms":6,"exit_code":0,"stdout_truncated":false,"stderr_truncated":false}
 ```
 
-`--timeout` sets wall seconds. `--idle` sets seconds without output. `--max-output` sets a per-stream byte cap; K, M, and G use powers of 1024. Zero disables a time limit. The child receives a small environment with PATH, locale, home, temporary-directory, and Windows system variables.
+`--timeout` sets wall seconds. `--idle` sets seconds without output. `--max-output` sets the default per-stream byte cap (`--max-stdout` and `--max-stderr` override each stream); K, M, and G use powers of 1024. Zero disables a time limit. Child `stdin` is closed by default unless `--stdin inherit` or `--input` is given. The child receives a small environment with PATH, locale, home, temporary-directory, and Windows system variables.
+
+Run in a specific directory with separate stream caps, passed input, and `--kill-on-cap`:
+
+```sh
+run-bounded --cwd /tmp --input $'line 1\nline 2\n' --max-stdout 7 --max-stderr 256 --kill-on-cap -- cat
+```
+
+```text
+line 1
+{"class":"output_limit","duration_ms":5,"exit_code":0,"stdout_truncated":true,"stderr_truncated":false}
+```
 
 ## Why
 
@@ -116,14 +127,16 @@ Inside an already-started Python interpreter, `bounded_run.run()` had a 3.5 ms m
 ## Reference
 
 ```text
-run-bounded [--timeout SEC] [--idle SEC] [--max-output BYTES] -- COMMAND [ARGS...]
+run-bounded [--timeout SEC] [--idle SEC] [--max-output BYTES] [--max-stdout BYTES] [--max-stderr BYTES] [--kill-on-cap] [--cwd DIR] [--stdin null|inherit] [--input TEXT] -- COMMAND [ARGS...]
 ```
 
-`COMMAND` can be an absolute executable path or a bare name found on PATH. The library is `bounded_run.run(command, timeout=60, idle=20, max_output=1048576)`. It returns a `RunResult` with `classification`, `duration`, `returncode`, captured `stdout` and `stderr` bytes, and one truncation flag per stream. Classifications are `ok`, `failed`, `timeout`, `idle`, or `signal`.
+`COMMAND` can be an absolute executable path or a bare name found on PATH. `--cwd` sets the working directory. `--stdin` defaults to `null` (closed); pass `inherit` to keep parent stdin, or `--input` to feed UTF-8 text and close stdin. `--max-stdout` and `--max-stderr` override `--max-output` per stream. `--kill-on-cap` terminates the process group or Job Object when either stream exceeds its cap and classifies the run as `output_limit` (exit code 1).
+
+The library is `bounded_run.run(command, *, timeout=60, idle=20, max_output=1048576, max_stdout=None, max_stderr=None, kill_on_cap=False, cwd=None, stdin=None, input=None, env=None)`. `stdin` defaults to closed (`DEVNULL`), accepts `"inherit"` or a readable file/fd, and `input` accepts `bytes` or `str`. It returns a `RunResult` with `classification`, `duration`, `returncode`, captured `stdout` and `stderr` bytes, and one truncation flag per stream. Classifications are `ok`, `failed`, `timeout`, `idle`, `output_limit`, or `signal`.
 
 ## Platforms
 
-The CLI was built and exercised on macOS 27.0 arm64, Ubuntu 24.04 arm64 on A1, and Windows build 26340 x64 (reported OS version 10.0.26340.0). The Python library was exercised on macOS and Windows. The Windows Rust build used the laptop's existing Rust 1.100 GNU toolchain. Timeout and idle return 124, CLI errors return 125, and normal child failures retain the child's exit code. A child terminated by a signal returns 128 plus the signal number, and its JSON `exit_code` is null. A consumer that stops reading its output cannot delay a timeout result: once a limit terminates the child, both editions report the timeout without waiting for the blocked output write or for a descendant that left the process group. When the runner itself receives SIGINT, SIGTERM or SIGHUP, it stops the child tree first; a Windows job also ends its children when the runner closes it.
+The CLI was built and exercised on macOS 27.0 arm64, Ubuntu 24.04 arm64 on A1, and Windows build 26340 x64 (reported OS version 10.0.26340.0). The Python library was exercised on macOS and Windows. The Windows Rust build used the laptop's existing Rust 1.100 GNU toolchain. Timeout and idle return 124, output-limit kills return 1, CLI errors return 125, and normal child failures retain the child's exit code. A child terminated by a signal returns 128 plus the signal number, and its JSON `exit_code` is null. A consumer that stops reading its output cannot delay a timeout result: once a limit terminates the child, both editions report the timeout without waiting for the blocked output write or for a descendant that left the process group. When the runner itself receives SIGINT, SIGTERM or SIGHUP, it stops the child tree first; a Windows job also ends its children when the runner closes it.
 
 ## Contributing
 
