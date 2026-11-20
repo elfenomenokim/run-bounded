@@ -50,6 +50,7 @@
     "docs/demo/social.html",
     "docs/social.png",
     ".github/workflows/claude.yml",
+    ".github/workflows/tests.yml",
     "CONTRIBUTING.md",
     "SECURITY.md",
     "CODE_OF_CONDUCT.md",
