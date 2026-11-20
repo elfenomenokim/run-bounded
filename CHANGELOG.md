@@ -3,6 +3,20 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses `MAJOR.MINOR.PATCH`.
 
+## [0.1.4] - 2026-11-20
+
+### Fixed
+
+- Windows: a child that exited before it was assigned to the kill-on-close job made
+  `run()` and the CLI fail with `PermissionError` (Access is denied). The job is now
+  created before the child starts, and a refused assignment is accepted only when the
+  child has already exited.
+
+### Changed
+
+- Tests run on Ubuntu, macOS and Windows in CI; the large-input CLI test stays under
+  Linux's 128 KiB single-argument limit.
+
 ## [0.1.3] - 2026-11-19
 
 ### Added
