@@ -161,7 +161,9 @@ fn stdin_is_closed_by_default_and_can_inherit_or_take_input() {
     assert_eq!(input_out.status.code(), Some(0));
     assert_eq!(input_out.stdout, b"from-flag\n");
 
-    let large_input = "x".repeat(131_072);
+    // Exceed the 64 KiB OS pipe buffer while staying below Linux's 128 KiB MAX_ARG_STRLEN
+    // (131,072 bytes including the NUL terminator); larger streams belong on --stdin inherit.
+    let large_input = "x".repeat(98_304);
     let ignored_input_out = Command::new(binary())
         .args(["--input", &large_input, "--", "/usr/bin/true"])
         .output()

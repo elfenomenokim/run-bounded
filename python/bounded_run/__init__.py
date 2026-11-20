@@ -125,19 +125,24 @@ def run(
         if executable is None:
             raise FileNotFoundError(f"command not found on PATH: {command[0]}")
         command = (executable, *command[1:])
-    proc = subprocess.Popen(
-        command,
-        stdin=popen_stdin,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=popen_cwd,
-        env=minimal,
-        start_new_session=(os.name == "posix"),
-    )
-    job = None
-    if os.name == "nt":
+    job = _new_windows_job() if os.name == "nt" else None
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdin=popen_stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=popen_cwd,
+            env=minimal,
+            start_new_session=(os.name == "posix"),
+        )
+    except BaseException:
+        if job is not None:
+            _close_windows_job(job)
+        raise
+    if job is not None:
         try:
-            job = _create_windows_job(proc)
+            job = _assign_windows_job(job, proc)
         except OSError:
             proc.kill()
             proc.wait()
@@ -263,7 +268,14 @@ def run(
     return RunResult(classification, time.monotonic()-start, proc.returncode, bytes(out), bytes(err), out_truncated, err_truncated)
 
 
+_ERROR_ACCESS_DENIED = 5
+_KERNEL32 = None
+
+
 def _windows_api():
+    global _KERNEL32
+    if _KERNEL32 is not None:
+        return _KERNEL32
     import ctypes
     from ctypes import wintypes
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -277,6 +289,7 @@ def _windows_api():
     kernel32.TerminateJobObject.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     kernel32.CloseHandle.restype = wintypes.BOOL
+    _KERNEL32 = kernel32
     return kernel32
 
 
@@ -315,7 +328,7 @@ def _job_limit_information(ctypes):
     return information
 
 
-def _create_windows_job(proc: subprocess.Popen):
+def _new_windows_job():
     import ctypes
     kernel32 = _windows_api()
     job = kernel32.CreateJobObjectW(None, None)
@@ -326,10 +339,21 @@ def _create_windows_job(proc: subprocess.Popen):
         error = ctypes.WinError(ctypes.get_last_error())
         kernel32.CloseHandle(job)
         raise error
+    return job
+
+
+def _assign_windows_job(job, proc: subprocess.Popen):
+    import ctypes
+    kernel32 = _windows_api()
     if not kernel32.AssignProcessToJobObject(job, ctypes.c_void_p(proc._handle)):
-        error = ctypes.WinError(ctypes.get_last_error())
+        err = ctypes.get_last_error()
         kernel32.CloseHandle(job)
-        raise error
+        # Windows returns ERROR_ACCESS_DENIED when the child has already exited
+        # before assignment; treat that race as harmless and keep fail-closed
+        # behavior whenever the child is still alive.
+        if err == _ERROR_ACCESS_DENIED and proc.poll() is not None:
+            return None
+        raise ctypes.WinError(err)
     return job
 
 

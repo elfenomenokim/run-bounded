@@ -104,7 +104,7 @@ class OptionsAndCapsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             res = run([sys.executable, "-c", "import os; print(os.getcwd())"], timeout=5, cwd=tmp)
             self.assertEqual(res.classification, "ok")
-            self.assertEqual(res.stdout.decode().strip(), os.path.realpath(tmp))
+            self.assertEqual(os.path.realpath(res.stdout.decode().strip()), os.path.realpath(tmp))
 
     def test_separate_stdout_and_stderr_caps(self):
         res = run(

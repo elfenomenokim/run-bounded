@@ -44,6 +44,8 @@ mod win_job {
 
     const KILL_ON_JOB_CLOSE: u32 = 0x2000;
     const EXTENDED_LIMIT_INFORMATION_CLASS: i32 = 9;
+    pub const ERROR_ACCESS_DENIED: i32 = 5;
+    pub const WAIT_OBJECT_0: u32 = 0;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -55,6 +57,7 @@ mod win_job {
             length: u32,
         ) -> i32;
         pub fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
+        pub fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
         pub fn TerminateJobObject(job: Handle, exit_code: u32) -> i32;
         pub fn CloseHandle(handle: Handle) -> i32;
     }
@@ -236,7 +239,16 @@ fn run() -> Result<(ResultRow, i32), String> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x00000200); // CREATE_NEW_PROCESS_GROUP
     }
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    let job = new_job().map_err(|error| format!("cannot create Windows Job Object: {error}"))?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            #[cfg(windows)]
+            close_job(job);
+            return Err(error.to_string());
+        }
+    };
     #[cfg(unix)]
     let pid = child.id();
     #[cfg(unix)]
@@ -244,14 +256,12 @@ fn run() -> Result<(ResultRow, i32), String> {
         CHILD_GROUP.store(pid as i32, Ordering::SeqCst);
     }
     #[cfg(windows)]
-    let job = match create_job(&child) {
+    let job = match assign_job(job, &child) {
         Ok(job) => job,
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!(
-                "cannot create or assign Windows Job Object: {error}"
-            ));
+            return Err(format!("cannot assign Windows Job Object: {error}"));
         }
     };
     if let Some(data) = input_text.filter(|t| !t.is_empty()).map(String::into_bytes) {
@@ -469,8 +479,7 @@ fn terminate_current(job: win_job::Handle) {
     }
 }
 #[cfg(windows)]
-fn create_job(child: &Child) -> io::Result<win_job::Handle> {
-    use std::os::windows::io::AsRawHandle;
+fn new_job() -> io::Result<win_job::Handle> {
     unsafe {
         let job = win_job::CreateJobObjectW(std::ptr::null(), std::ptr::null());
         if job.is_null() {
@@ -481,9 +490,22 @@ fn create_job(child: &Child) -> io::Result<win_job::Handle> {
             win_job::CloseHandle(job);
             return Err(err);
         }
-        if win_job::AssignProcessToJobObject(job, child.as_raw_handle() as _) == 0 {
+        Ok(job)
+    }
+}
+#[cfg(windows)]
+fn assign_job(job: win_job::Handle, child: &Child) -> io::Result<win_job::Handle> {
+    use std::os::windows::io::AsRawHandle;
+    unsafe {
+        let handle = child.as_raw_handle() as _;
+        if win_job::AssignProcessToJobObject(job, handle) == 0 {
             let err = io::Error::last_os_error();
             win_job::CloseHandle(job);
+            if err.raw_os_error() == Some(win_job::ERROR_ACCESS_DENIED)
+                && win_job::WaitForSingleObject(handle, 0) == win_job::WAIT_OBJECT_0
+            {
+                return Ok(std::ptr::null_mut());
+            }
             return Err(err);
         }
         Ok(job)
