@@ -7,7 +7,7 @@
 
 명령의 실행 시간, 출력량, 프로세스 트리를 제한하는 CLI와 Python 라이브러리입니다.
 
-Rust 1.82+ · Python 3.10+
+Rust 1.82+ · Python 3.9+
 
 [![pypi](https://img.shields.io/pypi/v/run-bounded?label=pypi)](https://pypi.org/project/run-bounded/)
 [![rust](https://img.shields.io/badge/rust-1.82%2B-lightgrey)](https://github.com/elfenomenokim/run-bounded/blob/main/Cargo.toml)
@@ -36,7 +36,7 @@ uv tool install run-bounded
 pip install run-bounded
 ```
 
-Python 3.10 이상이 필요합니다. macOS·Linux·Windows용 wheel에 `run-bounded` 실행 파일과 Python 패키지
+Python 3.9 이상이 필요합니다. macOS·Linux·Windows용 wheel에 `run-bounded` 실행 파일과 Python 패키지
 `bounded_run`이 함께 들어 있어 Rust를 설치하지 않아도 됩니다.
 
 소스에서 설치할 때는 Rust 1.82 이상이 필요합니다.

@@ -4,10 +4,10 @@ build-backend = "maturin"
 
 [project]
 name = "run-bounded"
-version = "0.1.7"
+version = "0.1.8"
 description = "A command-line tool and Python library for running commands with time, output, and process-tree limits."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "El Fenomeno" }]

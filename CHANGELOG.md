@@ -3,6 +3,12 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses `MAJOR.MINOR.PATCH`.
 
+## [0.1.8] - 2026-11-22
+
+### Added
+
+- Python 3.9 support, including Apple's system Python on macOS.
+
 ## [0.1.7] - 2026-11-22
 
 ### Added

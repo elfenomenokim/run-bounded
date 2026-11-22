@@ -33,7 +33,8 @@ The Python library lives in `python/bounded_run/` and is built by maturin; build
   to one that is not made in the other is a defect, not a follow-up.
 - **A line under Unreleased** in [CHANGELOG.md](CHANGELOG.md) when a user will notice.
 - **The platforms you did not test** written in the pull request. The `tests` workflow builds and
-  tests on Ubuntu, macOS and Windows with Python 3.10 and 3.13 (Unix CLI and process-group tests run
+  tests on Ubuntu, macOS and Windows with Python 3.10 and 3.13, plus Python 3.9
+  on Ubuntu 22.04 (Unix CLI and process-group tests run
   on Ubuntu and macOS).
 
 ## Review

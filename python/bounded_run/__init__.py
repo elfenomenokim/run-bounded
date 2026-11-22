@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from typing import Sequence
 
-__version__ = "0.1.7"
+__version__ = "0.1.8"
 
 
 @dataclass(frozen=True)

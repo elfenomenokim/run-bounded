@@ -7,7 +7,7 @@
 
 A command-line tool and Python library for running commands with time, output, and process-tree limits.
 
-Rust 1.82+ · Python 3.10+
+Rust 1.82+ · Python 3.9+
 
 [![pypi](https://img.shields.io/pypi/v/run-bounded?label=pypi)](https://pypi.org/project/run-bounded/)
 [![rust](https://img.shields.io/badge/rust-1.82%2B-lightgrey)](https://github.com/elfenomenokim/run-bounded/blob/main/Cargo.toml)
@@ -36,7 +36,7 @@ uv tool install run-bounded
 pip install run-bounded
 ```
 
-Python 3.10+. Wheels for macOS, Linux and Windows install the `run-bounded` binary and the importable
+Python 3.9+. Wheels for macOS, Linux and Windows install the `run-bounded` binary and the importable
 Python package `bounded_run`; no Rust toolchain is needed.
 
 From source (Rust 1.82 or newer):
