@@ -11,6 +11,87 @@ fn binary() -> &'static str {
 }
 
 #[test]
+fn stdout_only_idle_ignores_a_stderr_heartbeat() {
+    let heartbeat = "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+        echo heartbeat >&2; sleep 0.1; done; echo done";
+    let default = Command::new(binary())
+        .args(["--timeout", "5", "--idle", "0.5", "--", "/bin/sh", "-c", heartbeat])
+        .output()
+        .unwrap();
+    assert_eq!(default.status.code(), Some(0));
+    assert_eq!(default.stdout, b"done\n");
+
+    let output = Command::new(binary())
+        .args(["--timeout", "5", "--idle", "0.5", "--idle-stream", "stdout",
+               "--", "/bin/sh", "-c", heartbeat])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(124), "{stderr}");
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("heartbeat\n"), "{stderr}");
+    assert!(stderr.contains("\"class\":\"idle\""), "{stderr}");
+
+    let invalid = Command::new(binary())
+        .args(["--idle-stream", "stderr", "--", "/usr/bin/true"])
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(125));
+}
+
+#[test]
+fn exact_env_forwards_the_callers_environment_verbatim() {
+    let default = Command::new(binary())
+        .env_clear()
+        .env("FENO_BOUND_TEST", "supplied=value")
+        .args(["--", "/usr/bin/env"])
+        .output()
+        .unwrap();
+    assert_eq!(default.status.code(), Some(0));
+    assert!(default.stdout.is_empty());
+
+    let output = Command::new(binary())
+        .env_clear()
+        .env("FENO_BOUND_TEST", "supplied=value")
+        .args(["--env-exact", "--", "/usr/bin/env"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"FENO_BOUND_TEST=supplied=value\n");
+}
+
+#[test]
+fn first_overflow_byte_is_forwarded_and_triggers_the_cap() {
+    let output = Command::new(binary())
+        .args([
+            "--timeout", "3", "--max-stdout", "4", "--kill-on-cap",
+            "--capture-overflow-byte", "--", "/bin/sh", "-c", "printf abcde; exec sleep 30",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert_eq!(output.stdout, b"abcde");
+    assert!(stderr.contains("\"class\":\"output_limit\""), "{stderr}");
+    assert!(stderr.contains("\"stdout_truncated\":true"), "{stderr}");
+}
+
+#[test]
+fn zero_term_grace_kills_without_sending_term() {
+    let output = Command::new(binary())
+        .args([
+            "--timeout", "0.5", "--term-grace", "0", "--", "/bin/sh", "-c",
+            "trap 'echo term' TERM; echo ready; while :; do sleep 0.05; done",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(124), "{stderr}");
+    assert_eq!(output.stdout, b"ready\n");
+    assert!(stderr.contains("\"class\":\"timeout\""), "{stderr}");
+}
+
+#[test]
 fn signal_termination_returns_128_plus_signal() {
     let output = Command::new(binary())
         .args(["--", "/bin/sh", "-c", "kill -TERM $$"])

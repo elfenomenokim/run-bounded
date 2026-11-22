@@ -40,7 +40,7 @@ Goal: `run-bounded` runs on the user's machine and stops a command that runs too
 ## Implementation rules
 
 - Keep child `stdin` closed by default unless `inherit` or `input` is requested; keep child stdout and stderr independent and drain both while enforcing per-stream caps (`--max-stdout`/`--max-stderr`, defaulting to `--max-output`).
-- Accept absolute executable paths and bare names resolved through PATH; reject relative paths containing `/` or `\`. Pass only the documented minimal environment.
+- Accept absolute executable paths and bare names resolved through PATH; reject relative paths containing `/` or `\`. Use the documented minimal environment by default. Exact environment forwarding requires explicit opt-in.
 - Unix cleanup must signal the process group, not only the direct child, and a signal that stops the runner must do the same.
 - Windows cleanup must use a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` in both editions.
 - Keep the JSON result on stderr so child stdout remains usable as command output.
@@ -64,6 +64,6 @@ A change is a real defect when it:
 - changes a documented exit code: 124 for timeout and idle, 1 for `output_limit`, 128 + signal number for a signal death.
 - writes the JSON result to stdout instead of stderr, or emits a result that does not parse.
 - leaves the CLI and the Python library disagreeing on result fields or cap semantics.
-- inherits the full parent environment again, or resolves a relative path or a PATH entry the tool must reject.
+- inherits the full parent environment without explicit opt-in, or resolves a relative path or a PATH entry the tool must reject.
 
 Not defects: wording, formatting, type annotations, comment style, requested extra tests, or a renamed helper.

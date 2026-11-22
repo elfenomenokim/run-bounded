@@ -99,6 +99,7 @@ enum Event {
 /// After a deadline kill, forwarding may be blocked on a consumer that stopped
 /// reading. Let the streams drain for this long, then report the timeout anyway.
 const DRAIN_GRACE: Duration = Duration::from_millis(100);
+const DEFAULT_TERM_GRACE: Duration = Duration::from_millis(200);
 
 /// The child's process group, so a signal that stops the runner also stops the tree.
 #[cfg(unix)]
@@ -120,22 +121,26 @@ struct ResultRow {
     stdout_truncated: bool,
     stderr_truncated: bool,
 }
-const USAGE: &str = "usage: run-bounded [--timeout SEC] [--idle SEC] [--max-output BYTES] [--max-stdout BYTES] [--max-stderr BYTES] [--kill-on-cap] [--cwd DIR] [--stdin null|inherit] [--input TEXT] -- COMMAND [ARGS...]";
+const USAGE: &str = "usage: run-bounded [OPTIONS] -- COMMAND [ARGS...]";
 const HELP: &str = "run-bounded: run a command with time, output and process-tree limits.
 
 usage: run-bounded [OPTIONS] -- COMMAND [ARGS...]
-COMMAND must be an absolute path.
+COMMAND must be an absolute path or a bare name on PATH.
 
 options:
   --timeout SEC         wall-clock limit (default 60; 0 disables)
   --idle SEC            limit on time without output (default 20; 0 disables)
+  --idle-stream STREAM  either (default) or stdout for the idle clock
   --max-output BYTES    default byte cap for each stream (default 1048576; K, M, G = 1024^n)
   --max-stdout BYTES    cap for stdout, overriding --max-output
   --max-stderr BYTES    cap for stderr, overriding --max-output
   --kill-on-cap         stop the process tree when a cap is reached
+  --capture-overflow-byte  forward the first byte beyond each cap for diagnostics
+  --term-grace SEC      Unix TERM grace before KILL (default 0.2; 0 sends KILL directly)
   --cwd DIR             working directory for the command
   --stdin null|inherit  standard input (default: closed)
   --input TEXT          send TEXT on standard input, then close it
+  --env-exact           pass the runner's whole environment to the command
   -h, --help            print this help
   -V, --version         print the version
 
@@ -158,10 +163,14 @@ fn main() {
 fn run() -> Result<(ResultRow, i32), String> {
     let mut timeout = 60f64;
     let mut idle = 20f64;
+    let mut stdout_only_idle = false;
     let mut cap = 1_048_576usize;
     let mut max_stdout: Option<usize> = None;
     let mut max_stderr: Option<usize> = None;
     let mut kill_on_cap = false;
+    let mut capture_overflow_byte = false;
+    let mut term_grace = DEFAULT_TERM_GRACE;
+    let mut env_exact = false;
     let mut cwd: Option<String> = None;
     let mut stdin_mode: Option<String> = None;
     let mut input_text: Option<String> = None;
@@ -170,10 +179,23 @@ fn run() -> Result<(ResultRow, i32), String> {
         match a.as_str() {
             "--timeout" => timeout = parse(&args.next().ok_or("missing --timeout")?)?,
             "--idle" => idle = parse(&args.next().ok_or("missing --idle")?)?,
+            "--idle-stream" => {
+                stdout_only_idle = match args.next().as_deref() {
+                    Some("either") => false,
+                    Some("stdout") => true,
+                    _ => return Err("--idle-stream expects either or stdout".into()),
+                };
+            }
             "--max-output" => cap = parse_size(&args.next().ok_or("missing --max-output")?)?,
             "--max-stdout" => max_stdout = Some(parse_size(&args.next().ok_or("missing --max-stdout")?)?),
             "--max-stderr" => max_stderr = Some(parse_size(&args.next().ok_or("missing --max-stderr")?)?),
             "--kill-on-cap" => kill_on_cap = true,
+            "--capture-overflow-byte" => capture_overflow_byte = true,
+            "--term-grace" => {
+                let seconds = parse(&args.next().ok_or("missing --term-grace")?)?;
+                term_grace = Duration::from_secs_f64(seconds);
+            }
+            "--env-exact" => env_exact = true,
             "--cwd" => {
                 let dir = args.next().ok_or("missing --cwd")?;
                 if dir.is_empty() {
@@ -204,6 +226,8 @@ fn run() -> Result<(ResultRow, i32), String> {
     if stdin_mode.as_deref() == Some("inherit") && input_text.is_some() {
         return Err("--stdin inherit cannot be combined with --input".into());
     }
+    #[cfg(not(unix))]
+    let _ = term_grace;
     let command: Vec<String> = args.collect();
     if command.is_empty() {
         return Err(USAGE.into());
@@ -238,19 +262,23 @@ fn run() -> Result<(ResultRow, i32), String> {
     if let Some(ref dir) = cwd {
         cmd.current_dir(dir);
     }
-    for key in [
-        "PATH",
-        "HOME",
-        "TMPDIR",
-        "LANG",
-        "LC_ALL",
-        "SYSTEMROOT",
-        "WINDIR",
-        "TEMP",
-        "TMP",
-    ] {
-        if let Some(value) = env::var_os(key) {
-            cmd.env(key, value);
+    if env_exact {
+        cmd.envs(env::vars_os());
+    } else {
+        for key in [
+            "PATH",
+            "HOME",
+            "TMPDIR",
+            "LANG",
+            "LC_ALL",
+            "SYSTEMROOT",
+            "WINDIR",
+            "TEMP",
+            "TMP",
+        ] {
+            if let Some(value) = env::var_os(key) {
+                cmd.env(key, value);
+            }
         }
     }
     #[cfg(unix)]
@@ -308,8 +336,14 @@ fn run() -> Result<(ResultRow, i32), String> {
     let out_count = Arc::new(AtomicUsize::new(0));
     let err_count = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = mpsc::channel();
-    let a = reader(out, out_count.clone(), stdout_cap, kill_on_cap, tx.clone(), io::stdout());
-    let b = reader(err, err_count.clone(), stderr_cap, kill_on_cap, tx.clone(), io::stderr());
+    let a = reader(
+        out, out_count.clone(), stdout_cap, kill_on_cap, capture_overflow_byte,
+        idle > 0.0, tx.clone(), io::stdout(),
+    );
+    let b = reader(
+        err, err_count.clone(), stderr_cap, kill_on_cap, capture_overflow_byte,
+        idle > 0.0 && !stdout_only_idle, tx.clone(), io::stderr(),
+    );
     let waiter = thread::spawn(move || {
         let _ = tx.send(Event::Exited(child.wait()));
     });
@@ -335,12 +369,12 @@ fn run() -> Result<(ResultRow, i32), String> {
             None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
         };
         match event {
-            Ok(Event::Output(at)) => last_output = at,
+            Ok(Event::Output(at)) => last_output = last_output.max(at),
             Ok(Event::CapExceeded) => {
                 if !killed {
                     class = "output_limit";
                     #[cfg(unix)]
-                    terminate_current(pid);
+                    terminate_current(pid, term_grace);
                     #[cfg(windows)]
                     terminate_current(job);
                     killed = true;
@@ -363,7 +397,7 @@ fn run() -> Result<(ResultRow, i32), String> {
                     continue;
                 }
                 #[cfg(unix)]
-                terminate_current(pid);
+                terminate_current(pid, term_grace);
                 #[cfg(windows)]
                 terminate_current(job);
                 killed = true;
@@ -424,22 +458,27 @@ fn reader<R: Read + Send + 'static, W: Write + Send + 'static>(
     count: Arc<AtomicUsize>,
     cap: usize,
     kill_on_cap: bool,
+    capture_overflow_byte: bool,
+    counts_for_idle: bool,
     tx: mpsc::Sender<Event>,
     mut output: W,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        let capture_cap = cap.saturating_add(usize::from(capture_overflow_byte));
         let mut buf = [0u8; 8192];
         while let Ok(n) = input.read(&mut buf) {
             if n == 0 {
                 break;
             }
-            let _ = tx.send(Event::Output(Instant::now()));
+            if counts_for_idle {
+                let _ = tx.send(Event::Output(Instant::now()));
+            }
             let previous = count.fetch_add(n, Ordering::SeqCst);
             if kill_on_cap && previous <= cap && previous.saturating_add(n) > cap {
                 let _ = tx.send(Event::CapExceeded);
             }
-            if previous < cap {
-                let keep = (cap - previous).min(n);
+            if previous < capture_cap {
+                let keep = (capture_cap - previous).min(n);
                 let _ = output.write_all(&buf[..keep]);
                 let _ = output.flush();
             }
@@ -469,7 +508,7 @@ fn install_signal_handlers() {
 extern "C" fn on_stop_signal(signal: libc::c_int) {
     let group = CHILD_GROUP.load(Ordering::SeqCst);
     if group > 0 {
-        terminate_group(group);
+        terminate_group(group, DEFAULT_TERM_GRACE);
     }
     unsafe {
         libc::signal(signal, libc::SIG_DFL);
@@ -478,24 +517,28 @@ extern "C" fn on_stop_signal(signal: libc::c_int) {
     }
 }
 #[cfg(unix)]
-fn terminate_current(pid: u32) {
+fn terminate_current(pid: u32, term_grace: Duration) {
     if pid <= i32::MAX as u32 {
-        terminate_group(pid as i32);
+        terminate_group(pid as i32, term_grace);
     }
 }
-/// TERM the group, give it 200 ms, then KILL. Uses only async-signal-safe calls.
+/// Give the group its requested TERM grace before KILL. Only uses async-signal-safe calls.
 #[cfg(unix)]
-fn terminate_group(group: i32) {
-    unsafe { libc::kill(-group, libc::SIGTERM) };
-    let pause = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 5_000_000,
-    };
-    for _ in 0..40 {
+fn terminate_group(group: i32, mut term_grace: Duration) {
+    if !term_grace.is_zero() {
+        unsafe { libc::kill(-group, libc::SIGTERM) };
+    }
+    while !term_grace.is_zero() {
         if unsafe { libc::kill(-group, 0) } != 0 {
             return;
         }
+        let interval = term_grace.min(Duration::from_millis(5));
+        let pause = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: interval.subsec_nanos() as _,
+        };
         unsafe { libc::nanosleep(&pause, std::ptr::null_mut()) };
+        term_grace -= interval;
     }
     if unsafe { libc::kill(-group, 0) } == 0 {
         unsafe { libc::kill(-group, libc::SIGKILL) };

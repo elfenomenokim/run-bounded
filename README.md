@@ -127,12 +127,19 @@ Inside an already-started Python interpreter, `bounded_run.run()` had a 3.5 ms m
 ## Reference
 
 ```text
-run-bounded [--timeout SEC] [--idle SEC] [--max-output BYTES] [--max-stdout BYTES] [--max-stderr BYTES] [--kill-on-cap] [--cwd DIR] [--stdin null|inherit] [--input TEXT] -- COMMAND [ARGS...]
+run-bounded [OPTIONS] -- COMMAND [ARGS...]
 ```
 
 `COMMAND` can be an absolute executable path or a bare name found on PATH. `--cwd` sets the working directory. `--stdin` defaults to `null` (closed); pass `inherit` to keep parent stdin, or `--input` to feed UTF-8 text and close stdin. `--max-stdout` and `--max-stderr` override `--max-output` per stream. `--kill-on-cap` terminates the process group or Job Object when either stream exceeds its cap and classifies the run as `output_limit` (exit code 1).
 
-The library is `bounded_run.run(command, *, timeout=60, idle=20, max_output=1048576, max_stdout=None, max_stderr=None, kill_on_cap=False, cwd=None, stdin=None, input=None, env=None)`. `stdin` defaults to closed (`DEVNULL`), accepts `"inherit"` or a readable file/fd, and `input` accepts `bytes` or `str`. It returns a `RunResult` with `classification`, `duration`, `returncode`, captured `stdout` and `stderr` bytes, and one truncation flag per stream. Classifications are `ok`, `failed`, `timeout`, `idle`, `output_limit`, or `signal`.
+- `--idle-stream stdout` resets the idle clock on stdout activity only. The default, `either`, counts both streams.
+- `--env-exact` passes the runner's entire environment to the child. Set the environment when launching the runner to control which variables it receives. The default uses the small allowlist above.
+- `--capture-overflow-byte` forwards the first byte over each cap for diagnostics while preserving the cap's kill threshold.
+- `--term-grace SEC` sets the Unix TERM grace when a limit fires. The default is 0.2 seconds. Zero sends KILL directly. Windows uses its Job Object.
+
+Python's `bounded_run.run()` exposes the same controls as `idle_stream="stdout"`, `env_exact=True`, `capture_overflow_byte=True` and `term_grace=0.2`. By default, `env` overlays the small allowlist. With `env_exact=True`, the child gets only the `env` mapping, or an empty environment if omitted. `stdin` defaults to closed (`DEVNULL`) and accepts `"inherit"` or a readable file/fd. `input` accepts `bytes` or `str`.
+
+`RunResult` includes `classification`, `duration`, `returncode`, captured `stdout` and `stderr` bytes, truncation flags and the cleanup actions taken, if any. Classifications are `ok`, `failed`, `timeout`, `idle`, `output_limit`, and `signal`.
 
 ## Platforms
 

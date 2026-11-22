@@ -1,6 +1,7 @@
 """Run a child command with wall-time, idle-time, output, and tree limits."""
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import signal
@@ -9,6 +10,9 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Sequence
+
+__version__ = "0.1.6"
+
 
 @dataclass(frozen=True)
 class RunResult:
@@ -19,6 +23,7 @@ class RunResult:
     stderr: bytes
     stdout_truncated: bool
     stderr_truncated: bool
+    cleanup: str | None = None
 
 
 # After a deadline kill, a descendant outside the process group may still hold a
@@ -88,18 +93,26 @@ def run(
     *,
     timeout: float = 60,
     idle: float = 20,
+    idle_stream: str = "either",
     max_output: int = 1_048_576,
     max_stdout: int | None = None,
     max_stderr: int | None = None,
     kill_on_cap: bool = False,
+    capture_overflow_byte: bool = False,
+    term_grace: float = 0.2,
     cwd: str | os.PathLike[str] | None = None,
     stdin: object = None,
     input: bytes | str | None = None,
     env: dict[str, str] | None = None,
+    env_exact: bool = False,
 ) -> RunResult:
     """Execute an absolute or PATH-resolved command with independent stream caps."""
     if not command:
         raise ValueError("command must not be empty")
+    if idle_stream not in ("either", "stdout"):
+        raise ValueError("idle_stream must be 'either' or 'stdout'")
+    if not math.isfinite(term_grace) or term_grace < 0:
+        raise ValueError("term_grace must be finite and nonnegative")
     if (
         timeout < 0
         or idle < 0
@@ -115,13 +128,17 @@ def run(
     popen_stdin, input_bytes = _resolve_stdin(stdin, input)
     popen_cwd = os.fspath(cwd) if cwd is not None else None
     start = time.monotonic()
-    minimal = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SYSTEMROOT", "WINDIR", "TEMP", "TMP"}}
-    if env is not None: minimal.update(env)
+    child_env = {}
+    if not env_exact:
+        child_env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SYSTEMROOT", "WINDIR", "TEMP", "TMP"}}
+    if env is not None:
+        child_env.update(env)
     executable = command[0]
     if not os.path.isabs(executable):
         if "/" in executable or "\\" in executable:
             raise ValueError("relative command paths with a separator are not accepted; use a bare PATH name or an absolute path")
-        executable = shutil.which(executable, path=minimal.get("PATH"))
+        search_path = child_env.get("PATH", os.defpath if env_exact else None)
+        executable = shutil.which(executable, path=search_path)
         if executable is None:
             raise FileNotFoundError(f"command not found on PATH: {command[0]}")
         command = (executable, *command[1:])
@@ -133,7 +150,7 @@ def run(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=popen_cwd,
-            env=minimal,
+            env=child_env,
             start_new_session=(os.name == "posix"),
         )
     except BaseException:
@@ -172,18 +189,20 @@ def run(
     child_done = threading.Event()
     reader_done = [False, False]
     streams: list[tuple[bytearray, bool]] = [(bytearray(), False), (bytearray(), False)]
-    def drain(pipe, index, cap):
+    def drain(pipe, index, cap, counts_for_idle):
         try:
             while True:
                 chunk = os.read(pipe.fileno(), 8192)
                 if not chunk:
                     return
                 with lock:
-                    last_output[0] = time.monotonic()
+                    if counts_for_idle:
+                        last_output[0] = time.monotonic()
                     buf, truncated = streams[index]
                     room = cap - len(buf)
-                    if room > 0:
-                        buf.extend(chunk[:room])
+                    capture_room = room + capture_overflow_byte
+                    if capture_room > 0:
+                        buf.extend(chunk[:capture_room])
                     if len(chunk) > room and not truncated:
                         streams[index] = (buf, True)
                         if kill_on_cap:
@@ -197,8 +216,10 @@ def run(
             with lock:
                 reader_done[index] = True
             wake.set()
-    threads = [threading.Thread(target=drain, args=(proc.stdout, 0, caps[0]), daemon=True),
-               threading.Thread(target=drain, args=(proc.stderr, 1, caps[1]), daemon=True)]
+    threads = [
+        threading.Thread(target=drain, args=(proc.stdout, 0, caps[0], True), daemon=True),
+        threading.Thread(target=drain, args=(proc.stderr, 1, caps[1], idle_stream == "either"), daemon=True),
+    ]
     for t in threads: t.start()
     def wait_child():
         proc.wait()
@@ -208,6 +229,7 @@ def run(
     waiter.start()
     classification = "ok"
     killed = False
+    cleanup = None
     drain_until = None
     stopped = None
     handlers = _install_stop_handlers()
@@ -227,15 +249,17 @@ def run(
                         classification = "ok" if code == 0 else ("signal" if code < 0 else "failed")
                 break
             now = time.monotonic()
-            if not killed and kill_on_cap and hit_cap:
-                classification = "output_limit"; _terminate(proc, job); killed = True
-                drain_until = now + DRAIN_GRACE
-            elif not killed and timeout and now - start >= timeout:
-                classification = "timeout"; _terminate(proc, job); killed = True
-                drain_until = now + DRAIN_GRACE
-            elif not killed and idle and now - last >= idle:
-                classification = "idle"; _terminate(proc, job); killed = True
-                drain_until = now + DRAIN_GRACE
+            if not killed:
+                if kill_on_cap and hit_cap:
+                    classification = "output_limit"
+                elif timeout and now - start >= timeout:
+                    classification = "timeout"
+                elif idle and now - last >= idle:
+                    classification = "idle"
+                if classification != "ok":
+                    cleanup = _terminate(proc, job, term_grace=term_grace)
+                    killed = True
+                    drain_until = now + DRAIN_GRACE
             if killed:
                 if drain_until is None:
                     drain_until = time.monotonic() + DRAIN_GRACE
@@ -252,7 +276,7 @@ def run(
     finally:
         _restore_stop_handlers(handlers)
         if not child_done.is_set():
-            _terminate(proc, job)
+            _terminate(proc, job, term_grace=term_grace)
     grace_end = time.monotonic() + DRAIN_GRACE
     if feeder is not None:
         feeder.join(max(0, grace_end - time.monotonic()))
@@ -265,7 +289,8 @@ def run(
         signal.signal(stopped.signum, signal.SIG_DFL)
         os.kill(os.getpid(), stopped.signum)
         raise stopped
-    return RunResult(classification, time.monotonic()-start, proc.returncode, bytes(out), bytes(err), out_truncated, err_truncated)
+    return RunResult(classification, time.monotonic()-start, proc.returncode,
+                     bytes(out), bytes(err), out_truncated, err_truncated, cleanup)
 
 
 _ERROR_ACCESS_DENIED = 5
@@ -361,24 +386,30 @@ def _close_windows_job(job) -> None:
     _windows_api().CloseHandle(job)
 
 
-def _terminate(proc: subprocess.Popen, job=None) -> None:
+def _terminate(proc: subprocess.Popen, job=None, *, term_grace: float) -> str | None:
     if os.name == "posix":
         # macOS answers EPERM, not ESRCH, for a group left with only zombies (the leader
         # was already reaped). Treat both as "nothing left to signal", as the Rust edition does.
         gone = (ProcessLookupError, PermissionError)
-        try: os.killpg(proc.pid, signal.SIGTERM)
-        except gone: return
-        deadline = time.monotonic() + .2
-        while time.monotonic() < deadline:
-            try: os.killpg(proc.pid, 0)
-            except gone: return
-            time.sleep(.005)
+        phase = None
+        if term_grace:
+            try: os.killpg(proc.pid, signal.SIGTERM)
+            except gone: return phase
+            phase = "SIGTERM"
+            deadline = time.monotonic() + term_grace
+            while time.monotonic() < deadline:
+                try: os.killpg(proc.pid, 0)
+                except gone: return phase
+                time.sleep(.005)
         try: os.killpg(proc.pid, signal.SIGKILL)
-        except gone: pass
+        except gone: return phase
+        return "SIGTERM then SIGKILL" if phase else "SIGKILL"
     else:
         if job is None:
             proc.kill()
+            return "process kill"
         else:
             _windows_api().TerminateJobObject(job, 1)
+            return "TerminateJobObject"
 
 __all__ = ["RunResult", "run"]

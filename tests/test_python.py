@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "python"))
 
@@ -51,6 +52,7 @@ class TermResistantGroupTest(unittest.TestCase):
             )
             result = run([sys.executable, "-c", program, pid_file], timeout=0.5, idle=0)
             self.assertEqual(result.classification, "timeout")
+            self.assertEqual(result.cleanup, "SIGTERM then SIGKILL")
             with open(pid_file) as fh:
                 child = int(fh.read())
             for _ in range(40):
@@ -63,8 +65,69 @@ class TermResistantGroupTest(unittest.TestCase):
                 state = ps.read().strip()
             self.assertTrue(not state or state.startswith("Z"), f"descendant {child} still running")
 
+    def test_zero_term_grace_kills_without_sending_term(self):
+        import signal
+        program = (
+            "import signal, time; "
+            "signal.signal(signal.SIGTERM, lambda *_: print('term', flush=True)); "
+            "print('ready', flush=True); time.sleep(30)"
+        )
+        result = run([sys.executable, "-c", program], timeout=0.5, idle=0, term_grace=0)
+        self.assertEqual(result.classification, "timeout")
+        self.assertEqual(result.returncode, -signal.SIGKILL)
+        self.assertEqual(result.cleanup, "SIGKILL")
+        self.assertEqual(result.stdout, b"ready\n")
+
 
 class OptionsAndCapsTest(unittest.TestCase):
+    def test_stdout_only_idle_ignores_a_stderr_heartbeat(self):
+        program = """
+import sys, time
+for _ in range(15):
+    print('heartbeat', file=sys.stderr, flush=True)
+    time.sleep(0.1)
+print('done', flush=True)
+"""
+        command = [sys.executable, "-c", program]
+        default = run(command, timeout=5, idle=0.5)
+        self.assertEqual(default.classification, "ok")
+        self.assertEqual(default.stdout, b"done\n")
+
+        result = run(command, timeout=5, idle=0.5, idle_stream="stdout")
+        self.assertEqual(result.classification, "idle")
+        self.assertEqual(result.stdout, b"")
+        self.assertIn(b"heartbeat\n", result.stderr)
+
+        with self.assertRaises(ValueError):
+            run(command, idle_stream="stderr")
+
+    def test_exact_environment_does_not_overlay_the_base(self):
+        program = (
+            "import os; "
+            "print(os.getenv('FENO_BOUND_TEST')); "
+            "print(os.getenv('LANG'))"
+        )
+        command = [sys.executable, "-c", program]
+        env = {"FENO_BOUND_TEST": "supplied=value"}
+        if os.name == "nt":
+            env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
+        with patch.dict(os.environ, {"LANG": "original"}):
+            default = run(command, env=env)
+            self.assertEqual(default.stdout.splitlines(), [b"supplied=value", b"original"])
+            exact = run(command, env=env, env_exact=True)
+            self.assertEqual(exact.classification, "ok")
+            self.assertEqual(exact.stdout.splitlines(), [b"supplied=value", b"None"])
+
+    def test_one_overflow_byte_still_triggers_the_original_cap(self):
+        program = "import time; print('abcde', end='', flush=True); time.sleep(30)"
+        result = run(
+            [sys.executable, "-c", program], timeout=3, idle=0, max_stdout=4,
+            kill_on_cap=True, capture_overflow_byte=True,
+        )
+        self.assertEqual(result.classification, "output_limit")
+        self.assertEqual(result.stdout, b"abcde")
+        self.assertTrue(result.stdout_truncated)
+
     def test_stdin_closed_by_default_and_input_or_inherit(self):
         res = run([sys.executable, "-c", "import sys; sys.stdout.write(repr(sys.stdin.read()))"], timeout=5)
         self.assertEqual(res.classification, "ok")

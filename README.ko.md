@@ -119,12 +119,19 @@ CLI는 macOS 27.0 arm64, A1의 Ubuntu 24.04 arm64, Windows 빌드 26340 x64(보�
 ## 명령 형식
 
 ```text
-run-bounded [--timeout SEC] [--idle SEC] [--max-output BYTES] [--max-stdout BYTES] [--max-stderr BYTES] [--kill-on-cap] [--cwd DIR] [--stdin null|inherit] [--input TEXT] -- COMMAND [ARGS...]
+run-bounded [OPTIONS] -- COMMAND [ARGS...]
 ```
 
 `COMMAND`에는 절대 경로나 PATH에 있는 명령 이름을 지정합니다. `--cwd`는 작업 디렉터리를 바꿉니다. `--stdin` 기본값은 `null`(닫힘)이며, 부모 입력을 이어받으려면 `inherit`, UTF-8 텍스트를 넣고 닫으려면 `--input`을 씁니다. `--max-stdout`과 `--max-stderr`는 `--max-output`을 스트림별로 덮어씁니다. `--kill-on-cap`을 켜면 어느 한 스트림이라도 상한을 넘겼을 때 프로세스 그룹이나 Job Object를 종료하고 `output_limit`으로 분류하며 종료 코드 1을 반환합니다.
 
-라이브러리는 `bounded_run.run(command, *, timeout=60, idle=20, max_output=1048576, max_stdout=None, max_stderr=None, kill_on_cap=False, cwd=None, stdin=None, input=None, env=None)`을 제공합니다. `stdin` 기본값은 닫힘(`DEVNULL`)이고 `"inherit"`이나 읽을 수 있는 파일/fd를 받으며, `input`은 `bytes` 또는 `str`을 받습니다. 반환값 `RunResult`에는 분류, 실행 시간, 종료 코드, stdout/stderr 바이트와 각각의 잘림 여부가 들어 있습니다. 분류는 `ok`, `failed`, `timeout`, `idle`, `output_limit`, `signal`입니다.
+- `--idle-stream stdout`은 stdout에 출력이 있을 때만 유휴 시간을 초기화합니다. 기본값 `either`는 두 스트림을 모두 봅니다.
+- `--env-exact`는 실행기에 지정된 환경 변수를 모두 자식에게 전달합니다. 실행기를 호출할 때 전달할 변수를 지정할 수 있습니다. 기본값은 위의 허용 목록을 따릅니다.
+- `--capture-overflow-byte`는 상한을 넘긴 첫 바이트를 진단용으로 전달합니다. 종료 기준은 기존 상한을 따릅니다.
+- `--term-grace SEC`는 Unix에서 제한에 도달했을 때 TERM 이후 대기할 시간을 정합니다. 기본값은 0.2초이며 0이면 즉시 KILL을 보냅니다. Windows에서는 Job Object를 사용합니다.
+
+Python의 `bounded_run.run()`에서는 같은 설정을 `idle_stream="stdout"`, `env_exact=True`, `capture_overflow_byte=True`, `term_grace=0.2`로 지정합니다. 기본적으로 `env`를 허용 목록 위에 덮어쓰며, `env_exact=True`이면 `env`로 전달한 변수만 사용합니다. 이 모드에서 `env`를 생략하면 빈 환경을 전달합니다. `stdin` 기본값은 닫힘(`DEVNULL`)이며 `"inherit"`이나 읽을 수 있는 파일/fd를 받습니다. `input`은 `bytes` 또는 `str`을 받습니다.
+
+`RunResult`에는 분류, 실행 시간, 종료 코드, stdout/stderr 바이트, 각각의 잘림 여부, 그리고 실행된 종료 조치가 들어 있습니다. 분류는 `ok`, `failed`, `timeout`, `idle`, `output_limit`, `signal`입니다.
 
 ## 기여
 

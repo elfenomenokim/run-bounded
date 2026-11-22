@@ -3,6 +3,20 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses `MAJOR.MINOR.PATCH`.
 
+## [0.1.6] - 2026-11-22
+
+### Added
+
+- `--idle-stream stdout` and `idle_stream="stdout"` use only stdout activity to reset
+  the idle deadline. The default counts both streams.
+- `--env-exact` forwards the environment supplied to the runner. Python's
+  `env_exact=True` uses only the supplied `env` mapping.
+- `--capture-overflow-byte` and `capture_overflow_byte=True` retain the first
+  byte over each cap for diagnostics. Kill thresholds remain at the original caps.
+- `--term-grace` and `term_grace` control the Unix time between TERM and KILL when
+  a limit fires. Zero sends KILL directly. Python results record which cleanup
+  signals were sent.
+
 ## [0.1.5] - 2026-11-22
 
 ### Added
