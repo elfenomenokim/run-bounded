@@ -3,6 +3,13 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses `MAJOR.MINOR.PATCH`.
 
+## [0.1.5] - 2026-11-22
+
+### Added
+
+- `run-bounded --help` prints the options, output contract and exit statuses; `--version`
+  prints the version. Both exit 0 (before, they were unknown options and exited 125).
+
 ## [0.1.4] - 2026-11-20
 
 ### Fixed

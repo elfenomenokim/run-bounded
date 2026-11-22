@@ -120,6 +120,29 @@ struct ResultRow {
     stdout_truncated: bool,
     stderr_truncated: bool,
 }
+const USAGE: &str = "usage: run-bounded [--timeout SEC] [--idle SEC] [--max-output BYTES] [--max-stdout BYTES] [--max-stderr BYTES] [--kill-on-cap] [--cwd DIR] [--stdin null|inherit] [--input TEXT] -- COMMAND [ARGS...]";
+const HELP: &str = "run-bounded: run a command with time, output and process-tree limits.
+
+usage: run-bounded [OPTIONS] -- COMMAND [ARGS...]
+COMMAND must be an absolute path.
+
+options:
+  --timeout SEC         wall-clock limit (default 60; 0 disables)
+  --idle SEC            limit on time without output (default 20; 0 disables)
+  --max-output BYTES    default byte cap for each stream (default 1048576; K, M, G = 1024^n)
+  --max-stdout BYTES    cap for stdout, overriding --max-output
+  --max-stderr BYTES    cap for stderr, overriding --max-output
+  --kill-on-cap         stop the process tree when a cap is reached
+  --cwd DIR             working directory for the command
+  --stdin null|inherit  standard input (default: closed)
+  --input TEXT          send TEXT on standard input, then close it
+  -h, --help            print this help
+  -V, --version         print the version
+
+The command keeps its stdout and stderr; one JSON result line goes to stderr at the end.
+Exit status: the command's own; 124 on a time or idle limit; 1 when --kill-on-cap stopped it;
+128+N when a signal N ended it; 125 on a usage error.";
+
 fn main() {
     match run() {
         Ok((r, code)) => {
@@ -166,8 +189,16 @@ fn run() -> Result<(ResultRow, i32), String> {
                 stdin_mode = Some(mode);
             }
             "--input" => input_text = Some(args.next().ok_or("missing --input")?),
+            "-h" | "--help" => {
+                println!("{HELP}");
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("run-bounded {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             "--" => break,
-            _ => return Err(format!("unknown option {a}")),
+            _ => return Err(format!("unknown option {a} (see run-bounded --help)")),
         }
     }
     if stdin_mode.as_deref() == Some("inherit") && input_text.is_some() {
@@ -175,7 +206,7 @@ fn run() -> Result<(ResultRow, i32), String> {
     }
     let command: Vec<String> = args.collect();
     if command.is_empty() {
-        return Err("usage: run-bounded [--timeout SEC] [--idle SEC] [--max-output BYTES] [--max-stdout BYTES] [--max-stderr BYTES] [--kill-on-cap] [--cwd DIR] [--stdin null|inherit] [--input TEXT] -- COMMAND [ARGS...]".into());
+        return Err(USAGE.into());
     }
     if !std::path::Path::new(&command[0]).is_absolute()
         && (command[0].contains('/') || command[0].contains('\\'))

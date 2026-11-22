@@ -62,7 +62,7 @@ bounded output
 {"class":"ok","duration_ms":6,"exit_code":0,"stdout_truncated":false,"stderr_truncated":false}
 ```
 
-`--timeout` sets wall seconds. `--idle` sets seconds without output. `--max-output` sets the default per-stream byte cap (`--max-stdout` and `--max-stderr` override each stream); K, M, and G use powers of 1024. Zero disables a time limit. Child `stdin` is closed by default unless `--stdin inherit` or `--input` is given. The child receives a small environment with PATH, locale, home, temporary-directory, and Windows system variables.
+`--timeout` sets wall seconds. `--idle` sets seconds without output. `--max-output` sets the default per-stream byte cap (`--max-stdout` and `--max-stderr` override each stream); K, M, and G use powers of 1024. Zero disables a time limit. `run-bounded --help` lists every option. Child `stdin` is closed by default unless `--stdin inherit` or `--input` is given. The child receives a small environment with PATH, locale, home, temporary-directory, and Windows system variables.
 
 Run in a specific directory with separate stream caps, passed input, and `--kill-on-cap`:
 

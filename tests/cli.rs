@@ -273,3 +273,13 @@ fn kill_on_cap_terminates_process_group_and_reports_output_limit() {
     assert_ne!(unsafe { libc::kill(child_pid, 0) }, 0, "descendant survived kill-on-cap");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn help_and_version_exit_zero() {
+    let help = Command::new(env!("CARGO_BIN_EXE_run-bounded")).arg("--help").output().expect("spawn");
+    assert_eq!(help.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("--kill-on-cap"));
+    let version = Command::new(env!("CARGO_BIN_EXE_run-bounded")).arg("--version").output().expect("spawn");
+    assert_eq!(version.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&version.stdout).trim(), format!("run-bounded {}", env!("CARGO_PKG_VERSION")));
+}

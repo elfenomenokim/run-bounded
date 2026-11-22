@@ -62,7 +62,7 @@ bounded output
 {"class":"ok","duration_ms":6,"exit_code":0,"stdout_truncated":false,"stderr_truncated":false}
 ```
 
-`--timeout`은 전체 실행 시간(초), `--idle`은 출력이 없을 때의 제한 시간(초)입니다. `--max-output`은 stdout과 stderr의 기본 바이트 상한이며, `--max-stdout`과 `--max-stderr`로 스트림별 상한을 따로 줄 수 있습니다. K, M, G는 1024의 거듭제곱 단위입니다. 시간 제한에 0을 주면 해당 제한을 끕니다. `--stdin inherit`이나 `--input`을 지정하지 않으면 자식 `stdin`은 닫힌 상태로 시작합니다. 자식에는 PATH, 로캘, 홈, 임시 디렉터리, Windows 시스템 변수를 전달합니다.
+`--timeout`은 전체 실행 시간(초), `--idle`은 출력이 없을 때의 제한 시간(초)입니다. `--max-output`은 stdout과 stderr의 기본 바이트 상한이며, `--max-stdout`과 `--max-stderr`로 스트림별 상한을 따로 줄 수 있습니다. K, M, G는 1024의 거듭제곱 단위입니다. 시간 제한에 0을 주면 해당 제한을 끕니다. 모든 옵션은 `run-bounded --help`로 볼 수 있습니다. `--stdin inherit`이나 `--input`을 지정하지 않으면 자식 `stdin`은 닫힌 상태로 시작합니다. 자식에는 PATH, 로캘, 홈, 임시 디렉터리, Windows 시스템 변수를 전달합니다.
 
 작업 디렉터리 지정, 스트림별 상한, 입력 전달, 상한 초과 시 종료를 함께 쓰는 예입니다.
 
