@@ -114,7 +114,7 @@ line 1
 
 ## 플랫폼
 
-CLI는 macOS 27.0 arm64, A1의 Ubuntu 24.04 arm64, Windows 빌드 26340 x64(보고된 OS 버전 10.0.26340.0)에서 빌드와 동작을 확인했습니다. Python 라이브러리는 macOS와 Windows에서 확인했습니다. Windows Rust 빌드는 노트북에 이미 설치된 Rust 1.100 GNU 툴체인으로 진행했습니다. 시간 초과와 유휴 시간 초과는 124, 출력 상한 초과 종료는 1, CLI 오류는 125를 반환합니다. 일반 실패는 자식의 종료 코드를 유지합니다. 시그널로 종료된 자식은 128에 시그널 번호를 더한 값을 반환하고, JSON `exit_code`는 null입니다. 출력을 읽지 않는 소비자는 시간 초과 결과를 지연시킬 수 없습니다. 제한이 자식을 종료하면 두 에디션 모두 막힌 출력 쓰기나 프로세스 그룹을 떠난 자손을 기다리지 않고 시간 초과를 보고합니다. 실행기 자체가 SIGINT, SIGTERM, SIGHUP을 받으면 자식 트리를 먼저 종료합니다. Windows 작업 객체는 실행기가 닫힐 때도 자식을 종료합니다.
+CLI는 macOS 27.0 arm64, A1의 Ubuntu 24.04 arm64, Windows 빌드 26340 x64(보고된 OS 버전 10.0.26340.0)에서 빌드와 동작을 확인했습니다. Python 라이브러리는 macOS와 Windows에서 확인했습니다. Windows Rust 빌드는 노트북에 이미 설치된 Rust 1.100 GNU 툴체인으로 진행했습니다. 시간 초과와 유휴 시간 초과는 124, 출력 상한 초과 종료는 1, CLI 오류는 125를 반환합니다. 일반 실패는 자식의 종료 코드를 유지합니다. 시그널로 종료된 자식은 128에 시그널 번호를 더한 값을 반환하고, JSON `exit_code`는 null입니다. 출력을 읽지 않는 소비자는 시간 초과 결과를 지연시킬 수 없습니다. 제한이 자식을 종료하면 두 에디션 모두 막힌 출력 쓰기나 프로세스 그룹을 떠난 자손을 기다리지 않고 시간 초과를 보고합니다. 실행기 자체가 SIGINT, SIGTERM, SIGHUP을 받으면 자식 트리를 먼저 종료하고 `cancelled` 결과를 쓴 뒤 130으로 종료합니다. Windows에서는 CTRL_BREAK와 콘솔 닫기가 같은 동작을 합니다. Windows 작업 객체는 실행기가 닫힐 때도 자식을 종료합니다.
 
 ## 명령 형식
 
@@ -130,10 +130,16 @@ run-bounded [OPTIONS] -- COMMAND [ARGS...]
 - `--term-grace SEC`는 Unix에서 제한에 도달했을 때 TERM 이후 대기할 시간을 정합니다. 기본값은 0.2초이며 0이면 즉시 KILL을 보냅니다. Windows에서는 Job Object를 사용합니다.
 - `--max-total-output BYTES`는 stdout과 stderr의 합계에 추가 상한을 둡니다. 스트림별 상한으로 버린 바이트도 합계에 포함하며, 두 스트림에서 읽은 순서대로 남은 한도를 사용합니다. 바이트를 버린 스트림에는 잘림 표시가 붙습니다. `--kill-on-cap`은 합계 상한에도 적용됩니다. 스트림별 초과 바이트를 남기는 옵션도 합계 상한 안에서만 동작합니다.
 - `--no-reap`은 시간 제한이나 프로세스를 종료하는 출력 제한에 도달하면 TERM 유예 시간 없이 프로세스 트리 종료를 요청하고, 종료 상태나 남은 출력을 기다리지 않고 반환합니다. 종료 상태를 확인하지 못하면 결과에 `class: "unknown"`, `abandoned_pid`, `limit`(`timeout`, `idle`, `output_limit` 중 하나)을 기록합니다. CLI 종료 코드는 해당 제한에 따릅니다.
+- `--stdout-file PATH`, `--stderr-file PATH`는 자식 출력을 도착하는 대로 파일에 쓰고 전달하지 않습니다. `--append`는 덧붙여 씁니다. 전달 바이트는 스트림별 상한(`--max-stdout`/`--max-stderr`)을 그대로 받아서 싱크가 디스크를 무한히 채우지 못하게 하며, `--kill-on-cap` 의미는 그대로입니다.
+- `--merge-stderr`는 두 스트림을 하나의 순서 있는 로그로 stdout 싱크에 도착 순서대로 볃니다. 합쳐진 스트림은 하나의 예산을 공유하며, `--max-total-output` 지정 시 그 값, 아니면 `--max-stdout`을 씁니다. `--stderr-file`, `--stderr-keep`, `--max-stderr`와 함께 쓸 수 없습니다.
+- `--stdout-keep tail`, `--stderr-keep tail`은 스트림의 최신 상한 바이트를 링 버퍼에 유지하고 스트림이 닫힐 때 씁니다. tail 스트림은 그 자체로 상한이 있어 자기 스트림에서 `--kill-on-cap`을 일으키지 않습니다. 기본값 `head`는 도착한 첫 바이트를 유지합니다. tail은 `--*-file` 싱크에 쓸 수 없습니다.
+- SIGINT, SIGTERM, SIGHUP(Windows: CTRL_BREAK 또는 콘솔 닫기)을 받으면 자식 트리를 종료하고 `class: "cancelled"`를 보고한 뒤 130으로 종료합니다. 124(시간 제한), 125(준비 오류)와 구분됩니다.
 
-Python의 `bounded_run.run()`에서는 같은 설정을 `idle_stream="stdout"`, `env_exact=True`, `capture_overflow_byte=True`, `term_grace=0.2`로 지정합니다. 기본적으로 `env`를 허용 목록 위에 덮어쓰며, `env_exact=True`이면 `env`로 전달한 변수만 사용합니다. 이 모드에서 `env`를 생략하면 빈 환경을 전달합니다. `stdin` 기본값은 닫힘(`DEVNULL`)이며 `"inherit"`이나 읽을 수 있는 파일/fd를 받습니다. `input`은 `bytes` 또는 `str`을 받습니다.
+Python의 `bounded_run.run()`에서는 같은 설정을 `idle_stream="stdout"`, `env_exact=True`, `capture_overflow_byte=True`, `term_grace=0.2`로 지정합니다. 기본적으로 `env`를 허용 목록 위에 덮어쓰며, `env_exact=True`이면 `env`로 전달한 변수만 사용합니다. 이 모드에서 `env`를 생략하면 빈 환경을 전달합니다. `stdin` 기본값은 닫힘(`DEVNULL`)이며 `"inherit"`이나 읽을 수 있는 파일/fd를 받습니다. `input`은 `bytes` 또는 `str`을 받습니다. `stdout_sink=`/`stderr_sink=`는 경로(`wb`로 열고, `sink_append=True`이면 `ab`), 이진 파일 객체, 또는 순서대로 청크를 받는 호출 가능 객체를 받으며, 호출이 `False`를 반환하면 `"stopped"` 분류로 실행을 멈추고, 콜백에서 예외가 나면 정리 후 다시 던집니다. `merge_stderr=True`는 두 스트림을 stdout 싱크에 도착 순서대로 전달합니다. `stdout_keep=`/`stderr_keep="tail"`은 잡힌 스트림의 최신 상한 바이트를 유지합니다. `pass_fds=(fd, ...)`는 POSIX에서 추가 fd를 전달합니다(Windows에서는 ValueError).
 
-`RunResult`에는 분류, 실행 시간, 종료 코드, stdout/stderr 바이트, 각각의 잘림 여부, 그리고 실행된 종료 조치가 들어 있습니다. 합계 상한은 `max_total_output=BYTES`, 즉시 반환은 `no_reap=True`로 지정합니다. 분류는 `ok`, `failed`, `timeout`, `idle`, `output_limit`, `signal`, `unknown`입니다. `unknown`이면 `returncode`는 `None`이며 `abandoned_pid`와 `limit`으로 미완료 실행을 확인할 수 있습니다.
+`bounded_run.start()`는 실행을 시작하고 `Run` 핸들을 반환합니다. `pid`, `poll() -> RunResult | None`, `wait(timeout=None) -> RunResult`(대기 시간이 지나면 `TimeoutError`), `cancel(reason="cancelled")`(멱등; TERM 뒤 KILL; 컨텍스트 매니저는 종료 시 취소)을 제공합니다. 취소된 실행은 `"cancelled"`로 분류되고 `cancel_reason`을 기록합니다. `start()`의 핸들러는 시그널 핸들러를 설치하지 않습니다. `run()`은 0.1.8의 시그널 동작을 유지합니다. POSIX 메인 스레드에서 SIGINT, SIGTERM, SIGHUP을 임시로 가로채서 자식 트리를 종료하고, 이전 핸들러를 복원한 뒤 원래 시그널을 다시 던집니다.
+
+`RunResult`에는 분류, 실행 시간, 종료 코드, stdout/stderr 바이트, 각각의 잘림 여부, 그리고 실행된 종료 조치가 들어 있습니다. 싱크를 쓰면 `stdout`/`stderr`는 `b""`이며, `stdout_bytes`/`stderr_bytes`가 자식이 스트림별로 전달한 바이트 수를 알려 줍니다. 합계 상한은 `max_total_output=BYTES`, 즉시 반환은 `no_reap=True`로 지정합니다. 분류는 `ok`, `failed`, `timeout`, `idle`, `output_limit`, `signal`, `stopped`, `cancelled`, `unknown`입니다. `unknown`이면 `returncode`는 `None`이며 `abandoned_pid`와 `limit`으로 미완료 실행을 확인할 수 있습니다.
 
 ## 기여
 

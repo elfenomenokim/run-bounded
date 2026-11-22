@@ -292,5 +292,371 @@ print('done', flush=True)
         self.assertEqual(res.stdout, b"0123")
 
 
+class SinksCallbacksAndMergeTest(unittest.TestCase):
+    def test_file_sink_caps_delivery_reports_counts_and_stays_flat(self):
+        # Design test 1: 50 MiB through a 1 MiB-capped file sink. The file
+        # holds exactly the capped head, memory stays flat, and stdout_bytes
+        # reports the full delivered count.
+        import tracemalloc
+
+        block = bytes(range(256)) * 32  # 8192 bytes
+        total = 50 * 1024 * 1024
+        cap = 1024 * 1024
+        program = f"import sys; sys.stdout.buffer.write({block!r} * {total // len(block)})"
+        with tempfile.TemporaryDirectory() as tmp:
+            sink = Path(tmp) / "out.log"
+            tracemalloc.start()
+            before = tracemalloc.take_snapshot()
+            result = run(
+                [sys.executable, "-c", program],
+                timeout=30,
+                idle=0,
+                max_stdout=cap,
+                stdout_sink=sink,
+            )
+            after = tracemalloc.take_snapshot()
+            tracemalloc.stop()
+            self.assertEqual(result.classification, "ok")
+            self.assertEqual(result.stdout, b"")
+            self.assertEqual(result.stdout_bytes, total)
+            self.assertTrue(result.stdout_truncated)
+            self.assertFalse(result.stderr_truncated)
+            self.assertEqual(sink.read_bytes(), block * (cap // len(block)))
+            growth = sum(stat.size_diff for stat in after.compare_to(before, "filename"))
+            self.assertLess(growth, 8 * 1024 * 1024, f"the sink held {growth} bytes in memory")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sink = Path(tmp) / "out.log"
+            collected = []
+            result = run(
+                [sys.executable, "-c", program],
+                timeout=30,
+                idle=0,
+                max_stdout=cap,
+                stdout_sink=lambda chunk: collected.append(chunk) or True,
+            )
+            self.assertEqual(result.classification, "ok")
+            self.assertEqual(b"".join(collected), block * (cap // len(block)))
+            self.assertEqual(result.stdout_bytes, total)
+            self.assertTrue(result.stdout_truncated)
+
+    @unittest.skipUnless(os.name == "posix", "process-group check")
+    def test_callback_false_stops_the_run_and_kills_the_tree(self):
+        # Design test 2: a line consumer that returns False after line 3 stops
+        # the run (classification "stopped") and the grandchild is gone.
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = os.path.join(tmp, "child.pid")
+            program = (
+                "import subprocess, sys, time; "
+                "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                "open(sys.argv[1], 'w').write(str(g.pid)); "
+                "import time as t; "
+                "[print(f'line{i}', flush=True) or t.sleep(0.05) for i in range(1, 6)]; "
+                "t.sleep(30)"
+            )
+            newline_count = []
+
+            def consume(chunk):
+                newline_count.append(chunk.count(b"\n"))
+                return sum(newline_count) < 3
+
+            result = run(
+                [sys.executable, "-c", program, pid_file],
+                stdout_sink=consume,
+                timeout=10,
+                idle=5,
+            )
+            self.assertEqual(result.classification, "stopped")
+            self.assertEqual(result.stdout, b"")
+            with open(pid_file) as fh:
+                grandchild = int(fh.read())
+            for _ in range(40):
+                try:
+                    os.kill(grandchild, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.025)
+            with os.popen(f"ps -p {grandchild} -o stat=") as ps:
+                state = ps.read().strip()
+            self.assertTrue(not state or state.startswith("Z"), f"grandchild {grandchild} still running")
+
+    @unittest.skipUnless(os.name == "posix", "process-group check")
+    def test_callback_exception_is_reraised_after_cleanup(self):
+        # Design test 3: a failing callback stops the run, the tree is cleaned
+        # up, and the exception is re-raised from run() afterwards.
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = os.path.join(tmp, "child.pid")
+            program = (
+                "import subprocess, sys, time; "
+                "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                "open(sys.argv[1], 'w').write(str(g.pid)); "
+                "print('data', flush=True); time.sleep(30)"
+            )
+
+            def explode(chunk):
+                raise RuntimeError("sink exploded")
+
+            with self.assertRaises(RuntimeError):
+                run([sys.executable, "-c", program, pid_file], stdout_sink=explode, timeout=10, idle=5)
+            with open(pid_file) as fh:
+                grandchild = int(fh.read())
+            for _ in range(40):
+                try:
+                    os.kill(grandchild, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.025)
+            with os.popen(f"ps -p {grandchild} -o stat=") as ps:
+                state = ps.read().strip()
+            self.assertTrue(not state or state.startswith("Z"), f"grandchild {grandchild} still running")
+
+    def test_merge_stderr_preserves_arrival_order(self):
+        # Design test 4: interleaved writes reach the one merged sink in order.
+        program = (
+            "import sys, time; "
+            "sys.stdout.write('a'); sys.stdout.flush(); time.sleep(0.05); "
+            "sys.stderr.write('b'); sys.stderr.flush(); time.sleep(0.05); "
+            "sys.stdout.write('c'); sys.stdout.flush(); time.sleep(0.05); "
+            "sys.stderr.write('d'); sys.stderr.flush()"
+        )
+        pieces = []
+        result = run(
+            [sys.executable, "-c", program],
+            stdout_sink=lambda chunk: pieces.append(chunk) or True,
+            merge_stderr=True,
+            timeout=10,
+        )
+        self.assertEqual(result.classification, "ok")
+        self.assertEqual(b"".join(pieces), b"abcd")
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(result.stderr, b"")
+        self.assertEqual(result.stdout_bytes, 2)
+        self.assertEqual(result.stderr_bytes, 2)
+
+        with self.assertRaises(ValueError):
+            run([sys.executable, "-c", "print('x')"], merge_stderr=True, stderr_sink=pieces.append)
+        with self.assertRaises(ValueError):
+            run([sys.executable, "-c", "print('x')"], merge_stderr=True, max_stderr=10)
+
+
+@unittest.skipUnless(os.name == "posix", "process-group check")
+class StartCancelTest(unittest.TestCase):
+    def test_cancel_from_another_thread_marks_cancelled_and_kills_the_tree(self):
+        # Design test 5: start().cancel() mid-run from another thread gives a
+        # cancelled result with the reason, an idempotent second cancel, and a
+        # dead grandchild.
+        from bounded_run import start
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = os.path.join(tmp, "child.pid")
+            program = (
+                "import subprocess, sys, time; "
+                "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                "open(sys.argv[1], 'w').write(str(g.pid)); time.sleep(30)"
+            )
+            handle = start([sys.executable, "-c", program, pid_file], timeout=30, idle=0)
+            self.assertIsInstance(handle.pid, int)
+            cancel_done = threading.Event()
+
+            def cancel_later():
+                handle.cancel(reason="owner shutdown")
+                cancel_done.set()
+
+            timer = threading.Timer(0.3, cancel_later)
+            timer.start()
+            result = handle.wait(10)
+            timer.join(5)
+            self.assertTrue(cancel_done.is_set())
+            self.assertEqual(result.classification, "cancelled")
+            self.assertEqual(result.cancel_reason, "owner shutdown")
+            handle.cancel()  # idempotent: a finished run accepts a second cancel
+            self.assertIs(handle.poll(), result)
+            with open(pid_file) as fh:
+                grandchild = int(fh.read())
+            for _ in range(40):
+                try:
+                    os.kill(grandchild, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.025)
+            with os.popen(f"ps -p {grandchild} -o stat=") as ps:
+                state = ps.read().strip()
+            self.assertTrue(not state or state.startswith("Z"), f"grandchild {grandchild} still running")
+
+    def test_start_poll_and_context_manager(self):
+        from bounded_run import start
+
+        handle = start([sys.executable, "-c", "import time; time.sleep(2)"], timeout=10, idle=0)
+        self.assertIsNone(handle.poll())
+        result = handle.wait(5)
+        self.assertEqual(result.classification, "ok")
+
+        with start([sys.executable, "-c", "import time; time.sleep(30)"], timeout=30, idle=0) as handle:
+            pass
+        self.assertEqual(handle.poll().classification, "cancelled")
+
+
+@unittest.skipUnless(os.name == "posix", "pass_fds is POSIX-only")
+class PassFdsTest(unittest.TestCase):
+    def test_pass_fds_forwards_the_descriptor_and_ebadf_without_it(self):
+        # Design test 7: the child writes to an inherited fd; without pass_fds
+        # the same write dies with EBADF.
+        read_fd, write_fd = os.pipe()
+        program = f"import os; os.write({write_fd}, b'via-fd'); os.close({write_fd})"
+        try:
+            ok = run([sys.executable, "-c", program], pass_fds=(write_fd,), timeout=5)
+            self.assertEqual(ok.classification, "ok")
+            os.close(write_fd)
+            write_fd = None
+            self.assertEqual(os.read(read_fd, 16), b"via-fd")
+        finally:
+            os.close(read_fd)
+            if write_fd is not None:
+                os.close(write_fd)
+
+        read_fd, write_fd = os.pipe()
+        program = f"import os; os.write({write_fd}, b'x')"
+        try:
+            bad = run([sys.executable, "-c", program], timeout=5)
+            self.assertEqual(bad.classification, "failed")
+            self.assertTrue(b"EBADF" in bad.stderr or b"Bad file descriptor" in bad.stderr)
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+
+        with self.assertRaises(ValueError):
+            run([sys.executable, "-c", "print('x')"], pass_fds=(-1,))
+
+
+class TailKeepTest(unittest.TestCase):
+    def test_stderr_tail_keeps_exactly_the_newest_bytes(self):
+        # Design test 8: 10 MiB of stderr with a 1 MiB cap in tail mode keeps
+        # the last cap bytes exactly and never trips kill_on_cap.
+        block = bytes(range(256)) * 32  # 8192 bytes
+        total = 10 * 1024 * 1024
+        cap = 1024 * 1024
+        program = f"import sys; sys.stderr.buffer.write({block!r} * {total // len(block)})"
+        result = run(
+            [sys.executable, "-c", program],
+            timeout=30,
+            idle=10,
+            max_stderr=cap,
+            stderr_keep="tail",
+            kill_on_cap=True,
+        )
+        self.assertEqual(result.classification, "ok", "a tail stream is bounded by construction")
+        self.assertEqual(len(result.stderr), cap)
+        self.assertEqual(result.stderr, block * (cap // len(block)))
+        self.assertTrue(result.stderr_truncated)
+        self.assertEqual(result.stderr_bytes, total)
+        self.assertEqual(result.stdout, b"")
+
+    def test_tail_never_kills_while_the_stdout_cap_still_does(self):
+        program = (
+            "import sys, time; "
+            "sys.stderr.write('y' * 10000); sys.stderr.flush(); time.sleep(0.1); "
+            "sys.stdout.write('x' * 100000); sys.stdout.flush(); time.sleep(30)"
+        )
+        result = run(
+            [sys.executable, "-c", program],
+            timeout=15,
+            idle=0,
+            max_stdout=1024,
+            max_stderr=64,
+            stderr_keep="tail",
+            kill_on_cap=True,
+        )
+        self.assertEqual(result.classification, "output_limit", "the stdout cap still kills")
+        self.assertTrue(result.stdout_truncated)
+        self.assertEqual(result.stderr, b"y" * 64)
+        self.assertTrue(result.stderr_truncated)
+
+        with self.assertRaises(ValueError):
+            run([sys.executable, "-c", "print('x')"], stderr_keep="tail", stderr_sink=Path(os.devnull))
+
+
+@unittest.skipUnless(os.name == "posix", "main-thread stop-signal handlers")
+class StopSignalTest(unittest.TestCase):
+    """0.1.8 contract: run() stops the child tree when the parent itself is stopped."""
+
+    def _launch_probe_and_signal(self, signum):
+        # A parent Python runs run() on a sleeping child that records its pid;
+        # a stop signal must kill the child tree and then kill the parent by
+        # the same signal (the 0.1.8 re-raise contract).
+        child_prog = (
+            "import os, sys, time; "
+            "open(sys.argv[1], 'w').write(str(os.getpid())); "
+            "time.sleep(30)"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = os.path.join(tmp, "child.pid")
+            python_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "python")
+            probe = (
+                f"import sys; sys.path.insert(0, {os.path.abspath(python_dir)!r}); "
+                "from bounded_run import run; "
+                f"run([sys.executable, '-c', {child_prog!r}, {pid_file!r}], timeout=60, idle=0)"
+            )
+            parent = subprocess.Popen(
+                [sys.executable, "-c", probe],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            deadline = time.monotonic() + 10
+            while not os.path.exists(pid_file):
+                if parent.poll() is not None:
+                    self.fail(f"the probe exited early: {parent.stderr.read()!r}")
+                if time.monotonic() >= deadline:
+                    parent.kill()
+                    parent.wait()
+                    self.fail("the child never wrote its pid")
+                time.sleep(0.02)
+            child = int(open(pid_file).read())
+            time.sleep(0.2)  # let the probe reach run()'s wait
+            parent.send_signal(signum)
+            _, err = parent.communicate(timeout=10)
+            self.assertEqual(
+                parent.returncode,
+                -signum,
+                f"the probe must die by signal {signum}: {err!r}",
+            )
+            for _ in range(40):
+                try:
+                    os.kill(child, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.025)
+            with os.popen(f"ps -p {child} -o stat=") as ps:
+                state = ps.read().strip()
+            self.assertTrue(
+                not state or state.startswith("Z"),
+                f"child {child} outlived the parent's signal {signum}",
+            )
+
+    def test_sigterm_to_the_parent_kills_the_child_tree(self):
+        self._launch_probe_and_signal(signal.SIGTERM)
+
+    def test_sighup_to_the_parent_kills_the_child_tree(self):
+        self._launch_probe_and_signal(signal.SIGHUP)
+
+    def test_sigint_to_the_parent_kills_the_child_tree(self):
+        self._launch_probe_and_signal(signal.SIGINT)
+
+    def test_run_restores_the_previous_stop_handlers(self):
+        received = []
+
+        def custom(signum, _frame):
+            received.append(signum)
+
+        old_term = signal.signal(signal.SIGTERM, custom)
+        try:
+            result = run([sys.executable, "-c", "print('done')"], timeout=10)
+            self.assertEqual(result.classification, "ok")
+            self.assertIs(signal.getsignal(signal.SIGTERM), custom)
+            os.kill(os.getpid(), signal.SIGTERM)
+            self.assertEqual(received, [signal.SIGTERM])
+        finally:
+            signal.signal(signal.SIGTERM, old_term)
+
+
 if __name__ == "__main__":
     unittest.main()

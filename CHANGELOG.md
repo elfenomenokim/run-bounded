@@ -3,6 +3,46 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses `MAJOR.MINOR.PATCH`.
 
+## [0.2.0] - 2026-11-23
+
+### Added
+
+- Stream sinks and a chunk callback. `stdout_sink=`/`stderr_sink=` in
+  `bounded_run.run()` and `bounded_run.start()` accept a path (opened `wb`, or
+  `ab` with `sink_append=True`), a binary file object, or a callable receiving
+  each chunk in order; returning `False` stops the run with classification
+  `"stopped"`, and a callback exception stops the run and is re-raised after
+  cleanup. The CLI gains `--stdout-file PATH`, `--stderr-file PATH` and
+  `--append`. Caps still bound bytes delivered to a sink, so a sink cannot fill
+  a disk unbounded; `kill_on_cap` keeps its meaning.
+- `--merge-stderr` and `merge_stderr=True` deliver both child streams to the
+  stdout sink in arrival order, one ordered log, sharing one budget
+  (`--max-total-output` when given, otherwise `--max-stdout`).
+- `bounded_run.start()` returns a `Run` handle with `pid`, `poll()`,
+  `wait(timeout=None)` and `cancel(reason=...)` (idempotent; TERM then KILL to
+  the group or Job); a context manager cancels on exit. A cancelled run
+  classifies as `"cancelled"` and records `cancel_reason`.
+- The CLI turns SIGINT, SIGTERM and SIGHUP (on Windows CTRL_BREAK and console
+  close) into a `cancelled` verdict and exit code 130, distinct from 124
+  (timeout/idle) and 125 (setup errors).
+- `pass_fds=(fd, ...)` forwards extra file descriptors on POSIX (ValueError on
+  Windows).
+- `stdout_keep=`/`stderr_keep="tail"` (and `--stdout-keep`/`--stderr-keep
+  tail`) keep the newest capped bytes of a stream in a ring buffer; a tail
+  stream is bounded by construction and never trips `kill_on_cap` for its own
+  stream.
+- `RunResult` gains `stdout_bytes` and `stderr_bytes` (bytes the child
+  delivered per stream) and `cancel_reason`; `classification` gains `"stopped"`
+  and `"cancelled"`.
+
+### Changed
+
+- `run()` keeps the 0.1.8 stop-signal behavior: in the main POSIX thread it
+  temporarily turns SIGINT, SIGTERM and SIGHUP into a stop that kills the
+  child tree, restores the previous handlers and re-raises the signal, so an
+  interrupted parent cannot orphan the child. Handles from `start()` never
+  install signal handlers; cancel them explicitly with `Run.cancel()`.
+
 ## [0.1.8] - 2026-11-22
 
 ### Added

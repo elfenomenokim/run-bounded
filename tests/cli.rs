@@ -215,7 +215,7 @@ fn a_huge_limit_is_an_error_not_a_panic() {
 }
 
 #[test]
-fn a_runner_signal_terminates_the_child_group() {
+fn sigterm_cancels_with_exit_130_a_verdict_and_kills_the_child_group() {
     let dir = std::env::temp_dir().join(format!("run-bounded-signal-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create the pid directory");
@@ -224,6 +224,8 @@ fn a_runner_signal_terminates_the_child_group() {
     let mut runner = Command::new(binary())
         .args(["--timeout", "30", "--idle", "0", "--", "/bin/sh", "-c"])
         .arg(&script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn run-bounded");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -240,8 +242,11 @@ fn a_runner_signal_terminates_the_child_group() {
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    unsafe { libc::kill(runner.id() as i32, libc::SIGINT) };
-    let _ = runner.wait().expect("wait for run-bounded");
+    unsafe { libc::kill(runner.id() as i32, libc::SIGTERM) };
+    let output = runner.wait_with_output().expect("wait for run-bounded");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(130), "stderr: {stderr}");
+    assert!(stderr.contains("\"class\":\"cancelled\""), "stderr: {stderr}");
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if unsafe { libc::kill(child_pid, 0) } != 0 {
@@ -249,11 +254,123 @@ fn a_runner_signal_terminates_the_child_group() {
         }
         if Instant::now() >= deadline {
             unsafe { libc::kill(child_pid, libc::SIGKILL) };
-            panic!("the child outlived a SIGINT to the runner");
+            panic!("the child outlived a SIGTERM to the runner");
         }
         std::thread::sleep(Duration::from_millis(20));
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn stdout_file_sink_caps_delivered_bytes_and_reports_truncation() {
+    let path = std::env::temp_dir().join(format!("run-bounded-sink-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let output = Command::new(binary())
+        .args([
+            "--timeout", "10", "--idle", "0", "--max-stdout", "1M",
+            "--stdout-file",
+        ])
+        .arg(&path)
+        .args(["--", "/bin/sh", "-c", "head -c 16777216 /dev/zero"])
+        .output()
+        .expect("spawn run-bounded");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+    assert!(output.stdout.is_empty(), "forwarding must stop with a file sink");
+    assert!(stderr.contains("\"class\":\"ok\""), "stderr: {stderr}");
+    assert!(stderr.contains("\"stdout_truncated\":true"), "stderr: {stderr}");
+    let meta = std::fs::metadata(&path).expect("sink file exists");
+    assert_eq!(meta.len(), 1_048_576, "the sink holds exactly the capped bytes");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn stdout_file_sink_appends_with_append() {
+    let path = std::env::temp_dir().join(format!("run-bounded-append-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    for word in ["one", "two"] {
+        let output = Command::new(binary())
+            .arg("--stdout-file")
+            .arg(&path)
+            .arg("--append")
+            .args(["--", "/bin/sh", "-c", &format!("printf {word}")])
+            .output()
+            .expect("spawn run-bounded");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+    }
+    let content = std::fs::read_to_string(&path).expect("read the sink file");
+    assert_eq!(content, "onetwo");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn merge_stderr_writes_both_streams_to_stdout_in_arrival_order() {
+    let merged = Command::new(binary())
+        .args([
+            "--merge-stderr", "--", "/bin/sh", "-c",
+            "printf a; sleep 0.05; printf b >&2; sleep 0.05; printf c; sleep 0.05; printf d >&2",
+        ])
+        .output()
+        .expect("spawn run-bounded");
+    let stderr = String::from_utf8_lossy(&merged.stderr);
+    assert_eq!(merged.status.code(), Some(0), "stderr: {stderr}");
+    assert_eq!(merged.stdout, b"abcd", "stderr: {stderr}");
+    assert!(stderr.starts_with('{') && stderr.contains("\"class\":\"ok\""), "stderr: {stderr}");
+
+    let split = Command::new(binary())
+        .args([
+            "--", "/bin/sh", "-c",
+            "printf a; sleep 0.05; printf b >&2; sleep 0.05; printf c; sleep 0.05; printf d >&2",
+        ])
+        .output()
+        .expect("spawn run-bounded");
+    assert_eq!(split.stdout, b"ac");
+    assert!(String::from_utf8_lossy(&split.stderr).starts_with("bd"));
+
+    let conflict = Command::new(binary())
+        .args(["--merge-stderr", "--stderr-file", "/tmp/x", "--", "/usr/bin/true"])
+        .output()
+        .expect("spawn run-bounded");
+    assert_eq!(conflict.status.code(), Some(125));
+}
+
+#[test]
+fn stderr_keep_tail_writes_the_newest_bytes_when_the_stream_closes() {
+    let path = std::env::temp_dir().join(format!("run-bounded-keep-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    // A tail keep cannot feed a file sink (same rule as the Python edition).
+    let rejected = Command::new(binary())
+        .args([
+            "--max-stderr", "4", "--stderr-keep", "tail", "--stderr-file",
+        ])
+        .arg(&path)
+        .args(["--", "/bin/sh", "-c", "printf 123456789 >&2"])
+        .output()
+        .expect("spawn run-bounded");
+    assert_eq!(rejected.status.code(), Some(125));
+
+    // The tail is written to the CLI's own stderr before the verdict.
+    let direct = Command::new(binary())
+        .args([
+            "--max-stderr", "4", "--stderr-keep", "tail", "--",
+            "/bin/sh", "-c", "printf 123456789 >&2",
+        ])
+        .output()
+        .expect("spawn run-bounded");
+    let stderr = String::from_utf8_lossy(&direct.stderr);
+    assert_eq!(direct.status.code(), Some(0), "stderr: {stderr}");
+    assert!(stderr.contains("\"stderr_truncated\":true"), "stderr: {stderr}");
+    assert!(stderr.starts_with("6789{"), "stderr: {stderr}");
+
+    // The default head keep is unchanged.
+    let head = Command::new(binary())
+        .args(["--max-stderr", "4", "--", "/bin/sh", "-c", "printf 123456789 >&2"])
+        .output()
+        .expect("spawn run-bounded");
+    let stderr = String::from_utf8_lossy(&head.stderr);
+    assert_eq!(head.status.code(), Some(0), "stderr: {stderr}");
+    assert!(stderr.starts_with("1234{"), "stderr: {stderr}");
 }
 
 #[test]

@@ -60,6 +60,7 @@ mod win_job {
         pub fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
         pub fn TerminateJobObject(job: Handle, exit_code: u32) -> i32;
         pub fn CloseHandle(handle: Handle) -> i32;
+        pub fn SetConsoleCtrlHandler(handler: *const c_void, add: i32) -> i32;
     }
 
     /// Closing the last handle to a job with this flag kills every process still in it, so a
@@ -75,9 +76,9 @@ mod win_job {
         ) != 0
     }
 }
-#[cfg(unix)]
 use std::sync::atomic::AtomicI32;
 use std::{
+    collections::VecDeque,
     env,
     io::{self, Read, Write},
     process::{Command, ExitStatus, Stdio},
@@ -104,6 +105,84 @@ const DEFAULT_TERM_GRACE: Duration = Duration::from_millis(200);
 /// The child's process group, so a signal that stops the runner also stops the tree.
 #[cfg(unix)]
 static CHILD_GROUP: AtomicI32 = AtomicI32::new(0);
+
+/// Set by the stop-signal (or console-control) handler; the main loop turns it
+/// into a `cancelled` verdict and exit code 130.
+static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+static STOP_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+/// The assigned Windows Job Object, so the console-control handler can kill the tree.
+#[cfg(windows)]
+static CHILD_JOB: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    Head,
+    Tail,
+}
+
+enum Destination {
+    Stdout,
+    Stderr,
+    File(std::fs::File),
+}
+
+impl Destination {
+    fn write_chunk(&mut self, bytes: &[u8]) {
+        match self {
+            Destination::Stdout => {
+                let _ = io::stdout().write_all(bytes);
+                let _ = io::stdout().flush();
+            }
+            Destination::Stderr => {
+                let _ = io::stderr().write_all(bytes);
+                let _ = io::stderr().flush();
+            }
+            Destination::File(file) => {
+                let _ = file.write_all(bytes);
+            }
+        }
+    }
+}
+
+/// Newest-`cap`-bytes ring for `--*-keep tail`: bounded by construction, so a tail
+/// stream never trips `--kill-on-cap` for its own stream.
+struct TailRing {
+    cap: usize,
+    parts: VecDeque<Vec<u8>>,
+    total: usize,
+}
+
+impl TailRing {
+    fn new(cap: usize) -> Self {
+        TailRing { cap, parts: VecDeque::new(), total: 0 }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.parts.push_back(bytes.to_vec());
+        self.total += bytes.len();
+        while self.total > self.cap {
+            let excess = self.total - self.cap;
+            let head_len = self.parts.front().map_or(0, Vec::len);
+            if head_len <= excess {
+                self.total -= head_len;
+                self.parts.pop_front();
+            } else {
+                let mut head = self.parts.pop_front().expect("a front part");
+                head.drain(..excess);
+                self.total -= excess;
+                self.parts.push_front(head);
+            }
+        }
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.parts.into_iter().flatten().collect()
+    }
+}
 
 /// A deadline that a finite, in-range limit can represent; an unrepresentable one becomes none.
 fn deadline(base: Instant, seconds: f64) -> Option<Instant> {
@@ -140,6 +219,12 @@ options:
   --capture-overflow-byte  forward the first byte beyond each cap for diagnostics
   --term-grace SEC      Unix TERM grace before KILL (default 0.2; 0 sends KILL directly)
   --no-reap            force cleanup at a limit and return without waiting for exit
+  --stdout-file PATH    write child stdout to PATH instead of forwarding it
+  --stderr-file PATH    write child stderr to PATH instead of forwarding it
+  --append              open --stdout-file/--stderr-file for appending
+  --merge-stderr        send child stderr to the stdout sink in arrival order
+  --stdout-keep MODE    head (default) or tail: keep the newest --max-stdout bytes
+  --stderr-keep MODE    head (default) or tail: keep the newest --max-stderr bytes
   --cwd DIR             working directory for the command
   --stdin null|inherit  standard input (default: closed)
   --input TEXT          send TEXT on standard input, then close it
@@ -147,9 +232,12 @@ options:
   -h, --help            print this help
   -V, --version         print the version
 
-The command keeps its stdout and stderr; one JSON result line goes to stderr at the end.
+The command keeps its stdout and stderr unless a file sink is given; one JSON
+result line goes to stderr at the end. A tail keep buffers the newest bytes and
+writes them when the stream closes.
 Exit status: the command's own; 124 on a time or idle limit; 1 when --kill-on-cap stopped it;
-128+N when a signal N ended it; 125 on a usage error.";
+130 when a signal (SIGINT/SIGTERM/SIGHUP, or Windows CTRL_BREAK/console close) cancelled the
+run; 128+N when a signal N ended the command; 125 on a usage error.";
 
 fn main() {
     match run() {
@@ -179,6 +267,12 @@ fn run() -> Result<(ResultRow, i32), String> {
     let mut term_grace = DEFAULT_TERM_GRACE;
     let mut no_reap = false;
     let mut env_exact = false;
+    let mut stdout_file: Option<String> = None;
+    let mut stderr_file: Option<String> = None;
+    let mut sink_append = false;
+    let mut merge_stderr = false;
+    let mut stdout_keep = Keep::Head;
+    let mut stderr_keep = Keep::Head;
     let mut cwd: Option<String> = None;
     let mut stdin_mode: Option<String> = None;
     let mut input_text: Option<String> = None;
@@ -207,6 +301,12 @@ fn run() -> Result<(ResultRow, i32), String> {
                 term_grace = Duration::from_secs_f64(seconds);
             }
             "--no-reap" => no_reap = true,
+            "--stdout-file" => stdout_file = Some(args.next().ok_or("missing --stdout-file")?),
+            "--stderr-file" => stderr_file = Some(args.next().ok_or("missing --stderr-file")?),
+            "--append" => sink_append = true,
+            "--merge-stderr" => merge_stderr = true,
+            "--stdout-keep" => stdout_keep = parse_keep(&args.next().ok_or("missing --stdout-keep")?)?,
+            "--stderr-keep" => stderr_keep = parse_keep(&args.next().ok_or("missing --stderr-keep")?)?,
             "--env-exact" => env_exact = true,
             "--cwd" => {
                 let dir = args.next().ok_or("missing --cwd")?;
@@ -241,6 +341,35 @@ fn run() -> Result<(ResultRow, i32), String> {
     if no_reap {
         term_grace = Duration::ZERO;
     }
+    if merge_stderr && stderr_file.is_some() {
+        return Err("--merge-stderr cannot be combined with --stderr-file".into());
+    }
+    if merge_stderr && stderr_keep != Keep::Head {
+        return Err("--stderr-keep has no effect with --merge-stderr".into());
+    }
+    if merge_stderr && max_stderr.is_some() {
+        return Err("--max-stderr cannot be combined with --merge-stderr".into());
+    }
+    if stdout_file.is_some() && stdout_keep == Keep::Tail {
+        return Err("--stdout-keep tail cannot be combined with --stdout-file".into());
+    }
+    if stderr_file.is_some() && stderr_keep == Keep::Tail {
+        return Err("--stderr-keep tail cannot be combined with --stderr-file".into());
+    }
+    if sink_append && stdout_file.is_none() && stderr_file.is_none() {
+        return Err("--append requires --stdout-file or --stderr-file".into());
+    }
+    let open_sink = |path: &str| -> Result<std::fs::File, String> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .append(sink_append)
+            .truncate(!sink_append)
+            .open(path)
+            .map_err(|error| format!("cannot open {path}: {error}"))
+    };
+    let stdout_sink_file = stdout_file.as_deref().map(open_sink).transpose()?;
+    let stderr_sink_file = stderr_file.as_deref().map(open_sink).transpose()?;
     #[cfg(not(unix))]
     let _ = term_grace;
     let command: Vec<String> = args.collect();
@@ -268,6 +397,8 @@ fn run() -> Result<(ResultRow, i32), String> {
     let start = Instant::now();
     #[cfg(unix)]
     install_signal_handlers();
+    #[cfg(windows)]
+    install_console_ctrl_handler();
     let mut cmd = Command::new(&command[0]);
     cmd.args(&command[1..])
         .env_clear()
@@ -315,6 +446,8 @@ fn run() -> Result<(ResultRow, i32), String> {
     }
     #[cfg(windows)]
     let job = new_job().map_err(|error| format!("cannot create Windows Job Object: {error}"))?;
+    #[cfg(windows)]
+    store_job(job);
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -337,6 +470,8 @@ fn run() -> Result<(ResultRow, i32), String> {
             return Err(format!("cannot assign Windows Job Object: {error}"));
         }
     };
+    #[cfg(windows)]
+    store_job(job);
     if let Some(data) = input_text.filter(|t| !t.is_empty()).map(String::into_bytes) {
         if let Some(mut stdin_pipe) = child.stdin.take() {
             thread::spawn(move || {
@@ -349,27 +484,61 @@ fn run() -> Result<(ResultRow, i32), String> {
     let err = child.stderr.take().unwrap();
     let out_truncated = Arc::new(AtomicBool::new(false));
     let err_truncated = Arc::new(AtomicBool::new(false));
-    let total_room = max_total_output.map(|cap| Arc::new(Mutex::new(cap)));
+    // With --merge-stderr both streams deliver into the stdout sink in read order,
+    // sharing one budget: --max-total-output when given, otherwise --max-stdout.
+    let shared_room: Option<Arc<Mutex<usize>>> = if merge_stderr {
+        Some(Arc::new(Mutex::new(max_total_output.unwrap_or(stdout_cap))))
+    } else {
+        max_total_output.map(|cap| Arc::new(Mutex::new(cap)))
+    };
     let (tx, rx) = mpsc::channel();
+    let out_dest: Arc<Mutex<Destination>> = Arc::new(Mutex::new(match stdout_sink_file {
+        Some(file) => Destination::File(file),
+        None => Destination::Stdout,
+    }));
+    let err_dest: Arc<Mutex<Destination>> = if merge_stderr {
+        out_dest.clone()
+    } else {
+        Arc::new(Mutex::new(match stderr_sink_file {
+            Some(file) => Destination::File(file),
+            None => Destination::Stderr,
+        }))
+    };
     let a = reader(
-        out, out_truncated.clone(), stdout_cap, total_room.clone(), kill_on_cap, capture_overflow_byte,
-        idle > 0.0, tx.clone(), io::stdout(),
+        out, out_truncated.clone(),
+        if merge_stderr { usize::MAX } else { stdout_cap },
+        stdout_keep, out_dest, shared_room.clone(), kill_on_cap, capture_overflow_byte,
+        idle > 0.0, tx.clone(),
     );
     let b = reader(
-        err, err_truncated.clone(), stderr_cap, total_room, kill_on_cap, capture_overflow_byte,
-        idle > 0.0 && !stdout_only_idle, tx.clone(), io::stderr(),
+        err, err_truncated.clone(),
+        if merge_stderr { usize::MAX } else { stderr_cap },
+        stderr_keep, err_dest, shared_room, kill_on_cap, capture_overflow_byte,
+        idle > 0.0 && !stdout_only_idle, tx.clone(),
     );
     let waiter = thread::spawn(move || {
         let _ = tx.send(Event::Exited(child.wait()));
     });
     let mut class = "ok";
     let mut killed = false;
+    let mut cancelled = false;
     let mut last_output = start;
     let mut stream_count = 0;
     let mut status = None;
     let mut drain_until: Option<Instant> = None;
     let wall_deadline = deadline(start, timeout);
     while status.is_none() || stream_count < 2 {
+        if !cancelled && !killed && STOP_REQUESTED.load(Ordering::SeqCst) {
+            // The handler already terminated the tree; make sure (the group may
+            // not have existed yet) and report a distinct cancelled verdict.
+            cancelled = true;
+            #[cfg(unix)]
+            terminate_current(pid, term_grace);
+            #[cfg(windows)]
+            terminate_current(job);
+            killed = true;
+            class = "cancelled";
+        }
         if killed && status.is_some() && drain_until.is_none() {
             drain_until = Some(Instant::now() + DRAIN_GRACE);
         }
@@ -462,7 +631,7 @@ fn run() -> Result<(ResultRow, i32), String> {
             }
         }
     }
-    let abandoned = (no_reap && killed && !matches!(status, Some(Ok(_))))
+    let abandoned = (no_reap && killed && !cancelled && !matches!(status, Some(Ok(_))))
         .then_some((pid, class));
     let r = ResultRow {
         class: if abandoned.is_some() { "unknown" } else { class },
@@ -476,25 +645,29 @@ fn run() -> Result<(ResultRow, i32), String> {
         "ok" => 0,
         "timeout" | "idle" => 124,
         "output_limit" => 1,
+        "cancelled" => 130,
         "signal" => 128 + signal.unwrap_or(1),
         _ => exit.unwrap_or(1),
     };
     Ok((r, code))
 }
-fn reader<R: Read + Send + 'static, W: Write + Send + 'static>(
-    mut input: R,
+fn reader(
+    mut input: impl Read + Send + 'static,
     truncated: Arc<AtomicBool>,
     cap: usize,
+    keep: Keep,
+    dest: Arc<Mutex<Destination>>,
     total_room: Option<Arc<Mutex<usize>>>,
     kill_on_cap: bool,
     capture_overflow_byte: bool,
     counts_for_idle: bool,
     tx: mpsc::Sender<Event>,
-    mut output: W,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut room = cap;
         let mut capture_room = cap.saturating_add(usize::from(capture_overflow_byte));
+        let mut ring = TailRing::new(cap);
+        let mut observed = 0usize;
         let mut buf = [0u8; 8192];
         while let Ok(n) = input.read(&mut buf) {
             if n == 0 {
@@ -509,15 +682,35 @@ fn reader<R: Read + Send + 'static, W: Write + Send + 'static>(
                 *remaining = available.saturating_sub(n);
                 available
             });
-            if n > room.min(shared_room) && !truncated.swap(true, Ordering::SeqCst) && kill_on_cap {
-                let _ = tx.send(Event::CapExceeded);
+            match keep {
+                Keep::Head => {
+                    if n > room.min(shared_room) && !truncated.swap(true, Ordering::SeqCst) && kill_on_cap {
+                        let _ = tx.send(Event::CapExceeded);
+                    }
+                    let keep_len = capture_room.min(shared_room).min(n);
+                    room = room.saturating_sub(n);
+                    capture_room = capture_room.saturating_sub(n);
+                    if keep_len > 0 {
+                        dest.lock().unwrap().write_chunk(&buf[..keep_len]);
+                    }
+                }
+                Keep::Tail => {
+                    observed += n;
+                    let bound = cap.min(shared_room);
+                    if n > bound || observed > cap {
+                        truncated.store(true, Ordering::SeqCst);
+                    }
+                    if bound > 0 {
+                        ring.cap = bound;
+                        ring.push(&buf[..n]);
+                    }
+                }
             }
-            let keep = capture_room.min(shared_room).min(n);
-            room = room.saturating_sub(n);
-            capture_room = capture_room.saturating_sub(n);
-            if keep > 0 {
-                let _ = output.write_all(&buf[..keep]);
-                let _ = output.flush();
+        }
+        if keep == Keep::Tail {
+            let bytes = ring.into_bytes();
+            if !bytes.is_empty() {
+                dest.lock().unwrap().write_chunk(&bytes);
             }
         }
         let _ = tx.send(Event::StreamDone);
@@ -540,18 +733,47 @@ fn install_signal_handlers() {
         }
     }
 }
-/// Async-signal-safe cleanup: stop the child tree, then die by the signal that arrived.
+/// Async-signal-safe cleanup: stop the child tree and let the main loop write
+/// the `cancelled` verdict and exit 130.
 #[cfg(unix)]
 extern "C" fn on_stop_signal(signal: libc::c_int) {
+    STOP_SIGNAL.store(signal, Ordering::SeqCst);
+    STOP_REQUESTED.store(true, Ordering::SeqCst);
     let group = CHILD_GROUP.load(Ordering::SeqCst);
     if group > 0 {
         terminate_group(group, DEFAULT_TERM_GRACE);
     }
-    unsafe {
-        libc::signal(signal, libc::SIG_DFL);
-        libc::raise(signal);
-        libc::_exit(128 + signal);
+}
+
+/// Turn CTRL_BREAK and console close into the same cancelled verdict as a POSIX
+/// stop signal. Other control events keep their default handling.
+#[cfg(windows)]
+fn install_console_ctrl_handler() {
+    const CTRL_CLOSE_EVENT: u32 = 2;
+    const CTRL_BREAK_EVENT: u32 = 1;
+    unsafe extern "system" fn handler(ctrl_type: u32) -> i32 {
+        if ctrl_type == CTRL_BREAK_EVENT || ctrl_type == CTRL_CLOSE_EVENT {
+            STOP_SIGNAL.store(ctrl_type as i32, Ordering::SeqCst);
+            STOP_REQUESTED.store(true, Ordering::SeqCst);
+            let job = CHILD_JOB.load(Ordering::SeqCst) as win_job::Handle;
+            if !job.is_null() {
+                unsafe { let _ = win_job::TerminateJobObject(job, 1); }
+            }
+            return 1;
+        }
+        0
     }
+    unsafe {
+        win_job::SetConsoleCtrlHandler(handler as *const std::ffi::c_void, 1);
+    }
+}
+
+#[cfg(windows)]
+fn store_job(job: win_job::Handle) {
+    if job.is_null() {
+        return;
+    }
+    CHILD_JOB.store(job as isize, Ordering::SeqCst);
 }
 #[cfg(unix)]
 fn terminate_current(pid: u32, term_grace: Duration) {
@@ -628,6 +850,13 @@ fn close_job(job: win_job::Handle) {
         unsafe {
             win_job::CloseHandle(job);
         }
+    }
+}
+fn parse_keep(s: &str) -> Result<Keep, String> {
+    match s {
+        "head" => Ok(Keep::Head),
+        "tail" => Ok(Keep::Tail),
+        _ => Err(format!("invalid keep mode: {s} (expected head or tail)")),
     }
 }
 fn parse(s: &str) -> Result<f64, String> {
