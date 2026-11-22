@@ -1,5 +1,22 @@
 # Agent guide
 
+## Set up for a user
+
+Goal: `run-bounded` runs on the user's machine and stops a command that runs too long, goes silent or prints too much. Nothing here needs the person.
+
+1. Check what is present.
+   - `uv --version` prints a version. If not: `curl -LsSf https://astral.sh/uv/install.sh | sh`, then `export PATH="$HOME/.local/bin:$PATH"` (or open a new shell). On Windows: `powershell -c "irm https://astral.sh/uv/install.ps1 | iex"`.
+   - Python and Rust are not needed: the wheel carries the binary, and uv fetches a Python by itself.
+2. Install: `uv tool install run-bounded`. It ends with `Installed 1 executable: run-bounded`. `uv tool update-shell` puts `~/.local/bin` on PATH for later shells. (Python code that wants the library instead: `uv pip install run-bounded` inside the project's venv, then `import bounded_run`.)
+3. Prove it:
+   `run-bounded --timeout 5 --idle 2 --max-output 1K -- printf 'bounded output\n'` prints `bounded output` and then one JSON line on stderr starting `{"class":"ok","duration_ms":`, and exits 0.
+   `run-bounded --timeout 1 -- sleep 3; echo $?` prints a JSON line with `"class":"timeout"` and then `124`.
+4. If it fails, in this order:
+   - `run-bounded: command not found`: `~/.local/bin` is not on PATH (step 1).
+   - Exit 125: a bad option or a limit out of range; read the printed message. `--help` and `--version` do not exist; the options are listed in README.md.
+   - `relative command paths with a separator are not accepted`: give a bare name (`printf`) or an absolute path, not `./tool`.
+   - `No such file or directory (os error 2)`: the command is not on PATH in the minimal environment `run-bounded` passes; use its absolute path.
+
 ## Layout
 
 - `src/main.rs`: Rust CLI and process lifecycle.
@@ -15,7 +32,7 @@
 
 - Run `cargo build --locked` from this directory.
 - Run `cargo build --release --locked` for timing measurements.
-- Install from a checkout with `cargo install --locked --path .`; the wheel built by `python3 -m pip wheel --no-deps -w dist .` includes the same Rust command and the `bounded_run` Python module. The package is not published on PyPI or crates.io.
+- Install from a checkout with `cargo install --locked --path .`; the wheel built by `python3 -m pip wheel --no-deps -w dist .` includes the same Rust command and the `bounded_run` Python module. The wheel is published on PyPI as `run-bounded`; it is not on crates.io.
 - Install from a source checkout with `cargo install --path .`.
 - Build a local wheel with `python3 -m pip wheel --no-deps --wheel-dir target/wheels .`.
 - Run the demo with `vhs-safe docs/demo/run-bounded.tape` from the project root.
