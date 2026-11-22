@@ -11,6 +11,63 @@ fn binary() -> &'static str {
 }
 
 #[test]
+fn no_reap_returns_unknown_at_the_deadline_with_the_child_pid() {
+    // The incident fixture uses a disposable sleeping command in place of lsof.
+    let output = Command::new(binary())
+        .args([
+            "--timeout", "0.1", "--idle", "0", "--no-reap", "--term-grace", "5",
+            "--", "/bin/sh", "-c", "echo $$; sleep 60",
+        ])
+        .output()
+        .unwrap();
+    let pid: u32 = std::str::from_utf8(&output.stdout).unwrap().trim().parse().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(124), "{stderr}");
+    assert!(stderr.contains("\"class\":\"unknown\""), "{stderr}");
+    assert!(stderr.contains("\"exit_code\":null"), "{stderr}");
+    assert!(stderr.contains(&format!("\"abandoned_pid\":{pid},\"limit\":\"timeout\"")), "{stderr}");
+    assert!(stderr
+        .split("\"duration_ms\":")
+        .nth(1)
+        .and_then(|suffix| suffix.split(',').next())
+        .and_then(|duration| duration.parse::<u64>().ok())
+        .is_some_and(|ms| ms < 1000), "{stderr}");
+}
+
+#[test]
+fn no_reap_returns_a_normal_result_for_a_completed_child() {
+    let output = Command::new(binary())
+        .args(["--no-reap", "--", "/bin/sh", "-c", "printf done"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert_eq!(output.stdout, b"done");
+    assert!(stderr.contains("\"class\":\"ok\""), "{stderr}");
+    assert!(!stderr.contains("abandoned_pid"), "{stderr}");
+}
+
+#[test]
+fn combined_cap_is_shared_by_both_streams() {
+    let output = Command::new(binary())
+        .args([
+            "--max-total-output", "6", "--kill-on-cap", "--capture-overflow-byte",
+            "--", "/bin/sh", "-c", "printf abcd; printf wxyz >&2",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (child_stderr, result) = stderr.split_once('{').unwrap();
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert_eq!(output.stdout.len() + child_stderr.len(), 6);
+    assert!(b"abcd".starts_with(&output.stdout));
+    assert!("wxyz".starts_with(child_stderr));
+    assert!(result.contains("\"class\":\"output_limit\""), "{stderr}");
+    assert!(result.contains(&format!("\"stdout_truncated\":{}", output.stdout.len() < 4)), "{stderr}");
+    assert!(result.contains(&format!("\"stderr_truncated\":{}", child_stderr.len() < 4)), "{stderr}");
+}
+
+#[test]
 fn stdout_only_idle_ignores_a_stderr_heartbeat() {
     let heartbeat = "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
         echo heartbeat >&2; sleep 0.1; done; echo done";

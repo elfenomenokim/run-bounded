@@ -4,16 +4,56 @@ Run with: python3 tests/test_python.py
 """
 
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "python"))
 
 from bounded_run import run  # noqa: E402
+
+
+@unittest.skipUnless(os.name == "posix", "process-group check")
+class NoReapTest(unittest.TestCase):
+    def test_hung_lsof_returns_unknown_while_the_child_is_alive(self):
+        # Use the incident fixture's sleeping lsof, delaying only delivery of
+        # its KILL so the real wait stays blocked until test cleanup.
+        with tempfile.TemporaryDirectory() as tmp:
+            lsof = Path(tmp) / "lsof"
+            lsof.write_text("#!/bin/sh\nsleep 60\n", encoding="utf-8")
+            lsof.chmod(0o755)
+            reap = subprocess.Popen.wait
+            kill_group = os.killpg
+            children = []
+            reaped = threading.Event()
+
+            def wait(child):
+                children.append((child.pid, threading.current_thread().daemon))
+                try:
+                    return reap(child)
+                finally:
+                    reaped.set()
+
+            with patch.object(subprocess.Popen, "wait", wait), patch.object(os, "killpg") as kill:
+                try:
+                    result = run([str(lsof)], timeout=0.1, idle=0, no_reap=True)
+                    self.assertEqual((result.classification, result.limit), ("unknown", "timeout"))
+                    self.assertIsNone(result.returncode)
+                    self.assertEqual(children, [(result.abandoned_pid, True)])
+                    kill.assert_called_once_with(result.abandoned_pid, signal.SIGKILL)
+                    os.kill(result.abandoned_pid, 0)
+                    self.assertFalse(reaped.is_set())
+                    self.assertLess(result.duration, 0.4)
+                finally:
+                    for pid, _ in children:
+                        kill_group(pid, signal.SIGKILL)
+                    self.assertTrue(reaped.wait(2))
 
 
 @unittest.skipUnless(os.name == "posix", "process-group check")
@@ -80,6 +120,25 @@ class TermResistantGroupTest(unittest.TestCase):
 
 
 class OptionsAndCapsTest(unittest.TestCase):
+    def test_no_reap_returns_a_normal_result_for_a_completed_child(self):
+        res = run([sys.executable, "-c", "print('done')"], no_reap=True)
+        self.assertEqual((res.classification, res.returncode, res.stdout), ("ok", 0, b"done\n"))
+        self.assertIsNone(res.abandoned_pid)
+        self.assertIsNone(res.limit)
+
+    def test_combined_cap_is_shared_by_both_streams(self):
+        res = run(
+            [sys.executable, "-c", "import sys; print('abcd',end=''); print('wxyz',end='',file=sys.stderr)"],
+            max_total_output=6,
+            kill_on_cap=True,
+            capture_overflow_byte=True,
+        )
+        self.assertEqual(res.classification, "output_limit")
+        self.assertEqual(len(res.stdout) + len(res.stderr), 6)
+        self.assertTrue(b"abcd".startswith(res.stdout))
+        self.assertTrue(b"wxyz".startswith(res.stderr))
+        self.assertEqual((res.stdout_truncated, res.stderr_truncated), (len(res.stdout) < 4, len(res.stderr) < 4))
+
     def test_stdout_only_idle_ignores_a_stderr_heartbeat(self):
         program = """
 import sys, time

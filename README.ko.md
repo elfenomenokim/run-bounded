@@ -128,10 +128,12 @@ run-bounded [OPTIONS] -- COMMAND [ARGS...]
 - `--env-exact`는 실행기에 지정된 환경 변수를 모두 자식에게 전달합니다. 실행기를 호출할 때 전달할 변수를 지정할 수 있습니다. 기본값은 위의 허용 목록을 따릅니다.
 - `--capture-overflow-byte`는 상한을 넘긴 첫 바이트를 진단용으로 전달합니다. 종료 기준은 기존 상한을 따릅니다.
 - `--term-grace SEC`는 Unix에서 제한에 도달했을 때 TERM 이후 대기할 시간을 정합니다. 기본값은 0.2초이며 0이면 즉시 KILL을 보냅니다. Windows에서는 Job Object를 사용합니다.
+- `--max-total-output BYTES`는 stdout과 stderr의 합계에 추가 상한을 둡니다. 스트림별 상한으로 버린 바이트도 합계에 포함하며, 두 스트림에서 읽은 순서대로 남은 한도를 사용합니다. 바이트를 버린 스트림에는 잘림 표시가 붙습니다. `--kill-on-cap`은 합계 상한에도 적용됩니다. 스트림별 초과 바이트를 남기는 옵션도 합계 상한 안에서만 동작합니다.
+- `--no-reap`은 시간 제한이나 프로세스를 종료하는 출력 제한에 도달하면 TERM 유예 시간 없이 프로세스 트리 종료를 요청하고, 종료 상태나 남은 출력을 기다리지 않고 반환합니다. 종료 상태를 확인하지 못하면 결과에 `class: "unknown"`, `abandoned_pid`, `limit`(`timeout`, `idle`, `output_limit` 중 하나)을 기록합니다. CLI 종료 코드는 해당 제한에 따릅니다.
 
 Python의 `bounded_run.run()`에서는 같은 설정을 `idle_stream="stdout"`, `env_exact=True`, `capture_overflow_byte=True`, `term_grace=0.2`로 지정합니다. 기본적으로 `env`를 허용 목록 위에 덮어쓰며, `env_exact=True`이면 `env`로 전달한 변수만 사용합니다. 이 모드에서 `env`를 생략하면 빈 환경을 전달합니다. `stdin` 기본값은 닫힘(`DEVNULL`)이며 `"inherit"`이나 읽을 수 있는 파일/fd를 받습니다. `input`은 `bytes` 또는 `str`을 받습니다.
 
-`RunResult`에는 분류, 실행 시간, 종료 코드, stdout/stderr 바이트, 각각의 잘림 여부, 그리고 실행된 종료 조치가 들어 있습니다. 분류는 `ok`, `failed`, `timeout`, `idle`, `output_limit`, `signal`입니다.
+`RunResult`에는 분류, 실행 시간, 종료 코드, stdout/stderr 바이트, 각각의 잘림 여부, 그리고 실행된 종료 조치가 들어 있습니다. 합계 상한은 `max_total_output=BYTES`, 즉시 반환은 `no_reap=True`로 지정합니다. 분류는 `ok`, `failed`, `timeout`, `idle`, `output_limit`, `signal`, `unknown`입니다. `unknown`이면 `returncode`는 `None`이며 `abandoned_pid`와 `limit`으로 미완료 실행을 확인할 수 있습니다.
 
 ## 기여
 

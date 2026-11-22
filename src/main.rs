@@ -82,8 +82,8 @@ use std::{
     io::{self, Read, Write},
     process::{Command, ExitStatus, Stdio},
     sync::{
-        atomic::{AtomicUsize, Ordering},
-        mpsc, Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -120,6 +120,7 @@ struct ResultRow {
     exit_code: Option<i32>,
     stdout_truncated: bool,
     stderr_truncated: bool,
+    abandoned: Option<(u32, &'static str)>,
 }
 const USAGE: &str = "usage: run-bounded [OPTIONS] -- COMMAND [ARGS...]";
 const HELP: &str = "run-bounded: run a command with time, output and process-tree limits.
@@ -134,9 +135,11 @@ options:
   --max-output BYTES    default byte cap for each stream (default 1048576; K, M, G = 1024^n)
   --max-stdout BYTES    cap for stdout, overriding --max-output
   --max-stderr BYTES    cap for stderr, overriding --max-output
+  --max-total-output BYTES  shared byte cap across stdout and stderr
   --kill-on-cap         stop the process tree when a cap is reached
   --capture-overflow-byte  forward the first byte beyond each cap for diagnostics
   --term-grace SEC      Unix TERM grace before KILL (default 0.2; 0 sends KILL directly)
+  --no-reap            force cleanup at a limit and return without waiting for exit
   --cwd DIR             working directory for the command
   --stdin null|inherit  standard input (default: closed)
   --input TEXT          send TEXT on standard input, then close it
@@ -151,7 +154,10 @@ Exit status: the command's own; 124 on a time or idle limit; 1 when --kill-on-ca
 fn main() {
     match run() {
         Ok((r, code)) => {
-            eprintln!("{{\"class\":\"{}\",\"duration_ms\":{},\"exit_code\":{},\"stdout_truncated\":{},\"stderr_truncated\":{}}}", r.class, r.duration_ms, r.exit_code.map(|v| v.to_string()).unwrap_or("null".into()), r.stdout_truncated, r.stderr_truncated);
+            let abandoned = r.abandoned.map_or_else(String::new, |(pid, limit)| {
+                format!(",\"abandoned_pid\":{pid},\"limit\":\"{limit}\"")
+            });
+            eprintln!("{{\"class\":\"{}\",\"duration_ms\":{},\"exit_code\":{},\"stdout_truncated\":{},\"stderr_truncated\":{}{abandoned}}}", r.class, r.duration_ms, r.exit_code.map(|v| v.to_string()).unwrap_or("null".into()), r.stdout_truncated, r.stderr_truncated);
             std::process::exit(code);
         }
         Err(e) => {
@@ -167,9 +173,11 @@ fn run() -> Result<(ResultRow, i32), String> {
     let mut cap = 1_048_576usize;
     let mut max_stdout: Option<usize> = None;
     let mut max_stderr: Option<usize> = None;
+    let mut max_total_output: Option<usize> = None;
     let mut kill_on_cap = false;
     let mut capture_overflow_byte = false;
     let mut term_grace = DEFAULT_TERM_GRACE;
+    let mut no_reap = false;
     let mut env_exact = false;
     let mut cwd: Option<String> = None;
     let mut stdin_mode: Option<String> = None;
@@ -189,12 +197,16 @@ fn run() -> Result<(ResultRow, i32), String> {
             "--max-output" => cap = parse_size(&args.next().ok_or("missing --max-output")?)?,
             "--max-stdout" => max_stdout = Some(parse_size(&args.next().ok_or("missing --max-stdout")?)?),
             "--max-stderr" => max_stderr = Some(parse_size(&args.next().ok_or("missing --max-stderr")?)?),
+            "--max-total-output" => {
+                max_total_output = Some(parse_size(&args.next().ok_or("missing --max-total-output")?)?);
+            }
             "--kill-on-cap" => kill_on_cap = true,
             "--capture-overflow-byte" => capture_overflow_byte = true,
             "--term-grace" => {
                 let seconds = parse(&args.next().ok_or("missing --term-grace")?)?;
                 term_grace = Duration::from_secs_f64(seconds);
             }
+            "--no-reap" => no_reap = true,
             "--env-exact" => env_exact = true,
             "--cwd" => {
                 let dir = args.next().ok_or("missing --cwd")?;
@@ -225,6 +237,9 @@ fn run() -> Result<(ResultRow, i32), String> {
     }
     if stdin_mode.as_deref() == Some("inherit") && input_text.is_some() {
         return Err("--stdin inherit cannot be combined with --input".into());
+    }
+    if no_reap {
+        term_grace = Duration::ZERO;
     }
     #[cfg(not(unix))]
     let _ = term_grace;
@@ -308,7 +323,6 @@ fn run() -> Result<(ResultRow, i32), String> {
             return Err(error.to_string());
         }
     };
-    #[cfg(unix)]
     let pid = child.id();
     #[cfg(unix)]
     if pid <= i32::MAX as u32 {
@@ -333,15 +347,16 @@ fn run() -> Result<(ResultRow, i32), String> {
     }
     let out = child.stdout.take().unwrap();
     let err = child.stderr.take().unwrap();
-    let out_count = Arc::new(AtomicUsize::new(0));
-    let err_count = Arc::new(AtomicUsize::new(0));
+    let out_truncated = Arc::new(AtomicBool::new(false));
+    let err_truncated = Arc::new(AtomicBool::new(false));
+    let total_room = max_total_output.map(|cap| Arc::new(Mutex::new(cap)));
     let (tx, rx) = mpsc::channel();
     let a = reader(
-        out, out_count.clone(), stdout_cap, kill_on_cap, capture_overflow_byte,
+        out, out_truncated.clone(), stdout_cap, total_room.clone(), kill_on_cap, capture_overflow_byte,
         idle > 0.0, tx.clone(), io::stdout(),
     );
     let b = reader(
-        err, err_count.clone(), stderr_cap, kill_on_cap, capture_overflow_byte,
+        err, err_truncated.clone(), stderr_cap, total_room, kill_on_cap, capture_overflow_byte,
         idle > 0.0 && !stdout_only_idle, tx.clone(), io::stderr(),
     );
     let waiter = thread::spawn(move || {
@@ -353,6 +368,7 @@ fn run() -> Result<(ResultRow, i32), String> {
     let mut stream_count = 0;
     let mut status = None;
     let mut drain_until: Option<Instant> = None;
+    let wall_deadline = deadline(start, timeout);
     while status.is_none() || stream_count < 2 {
         if killed && status.is_some() && drain_until.is_none() {
             drain_until = Some(Instant::now() + DRAIN_GRACE);
@@ -360,13 +376,17 @@ fn run() -> Result<(ResultRow, i32), String> {
         let next_deadline = if killed {
             drain_until
         } else {
-            let wall = deadline(start, timeout);
             let idle_deadline = deadline(last_output, idle);
-            wall.into_iter().chain(idle_deadline).min()
+            wall_deadline.into_iter().chain(idle_deadline).min()
         };
-        let event = match next_deadline {
-            Some(deadline) => rx.recv_timeout(deadline.saturating_duration_since(Instant::now())),
-            None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+        let event = if no_reap && wall_deadline.is_some_and(|wall| Instant::now() >= wall) {
+            // Continuous output can keep the channel ready beyond the wall limit.
+            Err(mpsc::RecvTimeoutError::Timeout)
+        } else {
+            match next_deadline {
+                Some(deadline) => rx.recv_timeout(deadline.saturating_duration_since(Instant::now())),
+                None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+            }
         };
         match event {
             Ok(Event::Output(at)) => last_output = last_output.max(at),
@@ -406,12 +426,17 @@ fn run() -> Result<(ResultRow, i32), String> {
                 return Err("process monitor disconnected".into())
             }
         }
+        if no_reap && killed {
+            break;
+        }
     }
     if stream_count == 2 {
         let _ = a.join();
         let _ = b.join();
     }
-    let _ = waiter.join();
+    if !(no_reap && killed) {
+        let _ = waiter.join();
+    }
     #[cfg(windows)]
     close_job(job);
     let exit = status
@@ -422,8 +447,8 @@ fn run() -> Result<(ResultRow, i32), String> {
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .and_then(terminating_signal);
-    let stdout_truncated = out_count.load(Ordering::SeqCst) > stdout_cap;
-    let stderr_truncated = err_count.load(Ordering::SeqCst) > stderr_cap;
+    let stdout_truncated = out_truncated.load(Ordering::SeqCst);
+    let stderr_truncated = err_truncated.load(Ordering::SeqCst);
     if !killed {
         if kill_on_cap && (stdout_truncated || stderr_truncated) {
             class = "output_limit";
@@ -437,12 +462,15 @@ fn run() -> Result<(ResultRow, i32), String> {
             }
         }
     }
+    let abandoned = (no_reap && killed && !matches!(status, Some(Ok(_))))
+        .then_some((pid, class));
     let r = ResultRow {
-        class,
+        class: if abandoned.is_some() { "unknown" } else { class },
         duration_ms: start.elapsed().as_millis(),
         exit_code: exit,
         stdout_truncated,
         stderr_truncated,
+        abandoned,
     };
     let code = match class {
         "ok" => 0,
@@ -455,8 +483,9 @@ fn run() -> Result<(ResultRow, i32), String> {
 }
 fn reader<R: Read + Send + 'static, W: Write + Send + 'static>(
     mut input: R,
-    count: Arc<AtomicUsize>,
+    truncated: Arc<AtomicBool>,
     cap: usize,
+    total_room: Option<Arc<Mutex<usize>>>,
     kill_on_cap: bool,
     capture_overflow_byte: bool,
     counts_for_idle: bool,
@@ -464,7 +493,8 @@ fn reader<R: Read + Send + 'static, W: Write + Send + 'static>(
     mut output: W,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let capture_cap = cap.saturating_add(usize::from(capture_overflow_byte));
+        let mut room = cap;
+        let mut capture_room = cap.saturating_add(usize::from(capture_overflow_byte));
         let mut buf = [0u8; 8192];
         while let Ok(n) = input.read(&mut buf) {
             if n == 0 {
@@ -473,12 +503,19 @@ fn reader<R: Read + Send + 'static, W: Write + Send + 'static>(
             if counts_for_idle {
                 let _ = tx.send(Event::Output(Instant::now()));
             }
-            let previous = count.fetch_add(n, Ordering::SeqCst);
-            if kill_on_cap && previous <= cap && previous.saturating_add(n) > cap {
+            let shared_room = total_room.as_ref().map_or(usize::MAX, |remaining| {
+                let mut remaining = remaining.lock().unwrap();
+                let available = *remaining;
+                *remaining = available.saturating_sub(n);
+                available
+            });
+            if n > room.min(shared_room) && !truncated.swap(true, Ordering::SeqCst) && kill_on_cap {
                 let _ = tx.send(Event::CapExceeded);
             }
-            if previous < capture_cap {
-                let keep = (capture_cap - previous).min(n);
+            let keep = capture_room.min(shared_room).min(n);
+            room = room.saturating_sub(n);
+            capture_room = capture_room.saturating_sub(n);
+            if keep > 0 {
                 let _ = output.write_all(&buf[..keep]);
                 let _ = output.flush();
             }

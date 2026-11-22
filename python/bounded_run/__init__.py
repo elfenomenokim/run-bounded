@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from typing import Sequence
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,8 @@ class RunResult:
     stdout_truncated: bool
     stderr_truncated: bool
     cleanup: str | None = None
+    abandoned_pid: int | None = None
+    limit: str | None = None
 
 
 # After a deadline kill, a descendant outside the process group may still hold a
@@ -97,16 +99,18 @@ def run(
     max_output: int = 1_048_576,
     max_stdout: int | None = None,
     max_stderr: int | None = None,
+    max_total_output: int | None = None,
     kill_on_cap: bool = False,
     capture_overflow_byte: bool = False,
     term_grace: float = 0.2,
+    no_reap: bool = False,
     cwd: str | os.PathLike[str] | None = None,
     stdin: object = None,
     input: bytes | str | None = None,
     env: dict[str, str] | None = None,
     env_exact: bool = False,
 ) -> RunResult:
-    """Execute an absolute or PATH-resolved command with independent stream caps."""
+    """Execute an absolute or PATH-resolved command with optional shared limits."""
     if not command:
         raise ValueError("command must not be empty")
     if idle_stream not in ("either", "stdout"):
@@ -119,6 +123,7 @@ def run(
         or max_output < 0
         or (max_stdout is not None and max_stdout < 0)
         or (max_stderr is not None and max_stderr < 0)
+        or (max_total_output is not None and max_total_output < 0)
     ):
         raise ValueError("limits must be nonnegative")
     caps = (
@@ -188,19 +193,28 @@ def run(
     wake = threading.Event()
     child_done = threading.Event()
     reader_done = [False, False]
+    total_room = max_total_output
+    stop_reading = False
     streams: list[tuple[bytearray, bool]] = [(bytearray(), False), (bytearray(), False)]
     def drain(pipe, index, cap, counts_for_idle):
+        nonlocal total_room
         try:
             while True:
                 chunk = os.read(pipe.fileno(), 8192)
                 if not chunk:
                     return
                 with lock:
+                    if stop_reading:
+                        return
                     if counts_for_idle:
                         last_output[0] = time.monotonic()
                     buf, truncated = streams[index]
                     room = cap - len(buf)
                     capture_room = room + capture_overflow_byte
+                    if total_room is not None:
+                        room = min(room, total_room)
+                        capture_room = min(capture_room, total_room)
+                        total_room = max(0, total_room - len(chunk))
                     if capture_room > 0:
                         buf.extend(chunk[:capture_room])
                     if len(chunk) > room and not truncated:
@@ -257,8 +271,10 @@ def run(
                 elif idle and now - last >= idle:
                     classification = "idle"
                 if classification != "ok":
-                    cleanup = _terminate(proc, job, term_grace=term_grace)
+                    cleanup = _terminate(proc, job, term_grace=0 if no_reap else term_grace)
                     killed = True
+                    if no_reap:
+                        break
                     drain_until = now + DRAIN_GRACE
             if killed:
                 if drain_until is None:
@@ -275,22 +291,32 @@ def run(
         stopped = interrupt
     finally:
         _restore_stop_handlers(handlers)
-        if not child_done.is_set():
+        if not child_done.is_set() and not (no_reap and killed):
             _terminate(proc, job, term_grace=term_grace)
-    grace_end = time.monotonic() + DRAIN_GRACE
-    if feeder is not None:
-        feeder.join(max(0, grace_end - time.monotonic()))
-    for t in threads:
-        t.join(max(0, grace_end - time.monotonic()))
-    waiter.join(DRAIN_GRACE)
-    with lock: out, out_truncated = streams[0]; err, err_truncated = streams[1]
+    if not (no_reap and killed):
+        grace_end = time.monotonic() + DRAIN_GRACE
+        if feeder is not None:
+            feeder.join(max(0, grace_end - time.monotonic()))
+        for t in threads:
+            t.join(max(0, grace_end - time.monotonic()))
+        waiter.join(DRAIN_GRACE)
+    with lock:
+        stop_reading = no_reap and killed
+        out, out_truncated = streams[0]
+        err, err_truncated = streams[1]
+        stdout, stderr = bytes(out), bytes(err)
     if job is not None: _close_windows_job(job)
     if stopped is not None:
         signal.signal(stopped.signum, signal.SIG_DFL)
         os.kill(os.getpid(), stopped.signum)
         raise stopped
-    return RunResult(classification, time.monotonic()-start, proc.returncode,
-                     bytes(out), bytes(err), out_truncated, err_truncated, cleanup)
+    code = proc.returncode
+    limit = classification if no_reap and killed and code is None else None
+    return RunResult(
+        "unknown" if limit else classification, time.monotonic() - start, code,
+        stdout, stderr, out_truncated, err_truncated, cleanup,
+        abandoned_pid=proc.pid if limit else None, limit=limit,
+    )
 
 
 _ERROR_ACCESS_DENIED = 5

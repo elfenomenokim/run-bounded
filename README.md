@@ -136,10 +136,12 @@ run-bounded [OPTIONS] -- COMMAND [ARGS...]
 - `--env-exact` passes the runner's entire environment to the child. Set the environment when launching the runner to control which variables it receives. The default uses the small allowlist above.
 - `--capture-overflow-byte` forwards the first byte over each cap for diagnostics while preserving the cap's kill threshold.
 - `--term-grace SEC` sets the Unix TERM grace when a limit fires. The default is 0.2 seconds. Zero sends KILL directly. Windows uses its Job Object.
+- `--max-total-output BYTES` sets an additional shared cap for stdout and stderr. Bytes from both streams count, including bytes discarded by a per-stream cap. The readers use the shared budget in the order they read chunks. Any omitted bytes set the corresponding truncation flag. `--kill-on-cap` also applies to the shared cap. The optional per-stream overflow byte must fit inside the shared cap.
+- `--no-reap` requests immediate process-tree cleanup at a time limit or a killing output limit, with no TERM grace, then returns without waiting for exit or pending output. If the exit status is still unknown, the result reports `class: "unknown"`, `abandoned_pid`, and `limit` (`timeout`, `idle`, or `output_limit`). The CLI exit code still reflects the triggering limit.
 
 Python's `bounded_run.run()` exposes the same controls as `idle_stream="stdout"`, `env_exact=True`, `capture_overflow_byte=True` and `term_grace=0.2`. By default, `env` overlays the small allowlist. With `env_exact=True`, the child gets only the `env` mapping, or an empty environment if omitted. `stdin` defaults to closed (`DEVNULL`) and accepts `"inherit"` or a readable file/fd. `input` accepts `bytes` or `str`.
 
-`RunResult` includes `classification`, `duration`, `returncode`, captured `stdout` and `stderr` bytes, truncation flags and the cleanup actions taken, if any. Classifications are `ok`, `failed`, `timeout`, `idle`, `output_limit`, and `signal`.
+`RunResult` includes `classification`, `duration`, `returncode`, captured `stdout` and `stderr` bytes, truncation flags and the cleanup actions taken, if any. Use `max_total_output=BYTES` for the shared cap and `no_reap=True` for immediate return. Classifications are `ok`, `failed`, `timeout`, `idle`, `output_limit`, `signal`, and `unknown`. For `unknown`, `returncode` is `None` and `abandoned_pid` and `limit` describe the incomplete run.
 
 ## Platforms
 

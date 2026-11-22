@@ -3,6 +3,16 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses `MAJOR.MINOR.PATCH`.
 
+## [0.1.7] - 2026-11-22
+
+### Added
+
+- `--no-reap` and `no_reap=True` request immediate process-tree cleanup at a
+  limit and return without waiting. If the child exit is still unknown, the
+  result includes `abandoned_pid` and the triggering `limit`.
+- `--max-total-output` and `max_total_output` add a shared byte cap across both
+  streams, alongside the individual stream caps.
+
 ## [0.1.6] - 2026-11-22
 
 ### Added
